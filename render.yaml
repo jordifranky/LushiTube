@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: lushitube
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d0b12">
+  <meta name="description" content="LushiTube Studio: descarga contenido permitido y convierte tus archivos multimedia desde una interfaz rápida y clara.">
+  <title>LushiTube Studio · Descarga y conversión multimedia</title>
+  <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <!-- Iconos inline: sin dependencias externas y con un lenguaje visual coherente. -->
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.1-2.1a4 4 0 0 0-5.7-5.7l-1.2 1.2"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.1 2.1a4 4 0 0 0 5.7 5.7l1.2-1.2"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m7.5 10 4.5 4.5 4.5-4.5"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h2l2-6 3 12 3-9 2 6 2-3h4"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 7 8 5-8 5z"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="4"/><circle cx="12" cy="13" r="4"/><path d="M17.5 8.5h.01"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M5 17a4 4 0 0 1 .7-7.9A6 6 0 0 1 17 8a4.5 4.5 0 0 1 1 8.9H5z"/></symbol>
+    <symbol id="i-facebook" viewBox="0 0 24 24"><path d="M14 8h3V4h-3c-3 0-5 2-5 5v3H6v4h3v5h4v-5h3l1-4h-4V9c0-.7.3-1 1-1z"/></symbol>
+    <symbol id="i-tiktok" viewBox="0 0 24 24"><path d="M14 4v10.5a4.5 4.5 0 1 1-4-4.47"/><path d="M14 4c.7 2.4 2.3 3.7 5 4"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 5 14h6l-1 8 9-13h-6z"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-clipboard" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5A2.5 2.5 0 0 1 11.5 2h1A2.5 2.5 0 0 1 15 4.5V6H9z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.2A8.5 8.5 0 1 1 8.8 4a7 7 0 0 0 11.2 11.2z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></symbol>
+  </svg>
+  <canvas id="particles-canvas" class="particles" aria-hidden="true"></canvas>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <header class="site-header" id="top">
+    <div class="header-inner shell">
+      <a class="brand" href="#top" aria-label="LushiTube Studio, inicio">
+        <span class="brand-mark"><img src="{{ url_for('static', filename='img/Lushitube.png') }}" alt=""></span>
+        <span class="brand-copy">
+          <strong>LushiTube</strong>
+          <small>STUDIO</small>
+        </span>
+      </a>
+
+      <nav class="nav-links" id="main-nav-links" aria-label="Navegación principal">
+        <a class="active" href="#descargar" data-nav="download">Descargador</a>
+        <a href="#conversor" data-nav="convert">Conversor</a>
+        <a href="#caracteristicas">Características</a>
+        <a href="#faq">Preguntas</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" id="btn-theme" type="button" aria-label="Cambiar tema">
+          <span class="theme-icon" aria-hidden="true"><svg><use href="#i-moon"></use></svg></span>
+          <span class="theme-label">Oscuro</span>
+        </button>
+        <button class="menu-toggle" id="mobile-nav-toggle" type="button" aria-expanded="false" aria-controls="main-nav-links" aria-label="Abrir menú">
+          <span></span><span></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero shell" id="descargar">
+      <div class="hero-atmosphere" aria-hidden="true">
+        <div class="signal-orbit signal-orbit-a"><span></span></div>
+        <div class="signal-orbit signal-orbit-b"><span></span></div>
+        <div class="signal-wave wave-a"></div>
+        <div class="signal-wave wave-b"></div>
+        <div class="floating-code code-mp3"><b>MP3</b><small>320</small></div>
+        <div class="floating-code code-mp4"><b>MP4</b><small>HD</small></div>
+        <div class="floating-code code-wav"><b>WAV</b><small>PCM</small></div>
+      </div>
+
+      <div class="hero-copy reveal">
+        <div class="eyebrow"><span></span> Descargador + conversor multimedia</div>
+        <h1>
+          <span class="headline-line">Descarga.</span>
+          <span class="headline-line">Convierte.</span>
+          <em class="headline-accent">Sigue creando.</em>
+        </h1>
+        <p>Pega un enlace o sube un archivo, elige el formato y LushiTube se encarga del resto.</p>
+        <div class="hero-meta" aria-label="Ventajas principales">
+          <span>Sin registro</span>
+          <span>Proceso directo</span>
+          <span>Audio y video</span>
+        </div>
+      </div>
+
+      <div class="hero-stepper reveal" aria-label="Proceso de descarga">
+        <div class="hero-step active"><b>01</b><span>URL o archivo</span></div>
+        <i></i>
+        <div class="hero-step"><b>02</b><span>Elige formato</span></div>
+        <i></i>
+        <div class="hero-step"><b>03</b><span>Descarga</span></div>
+        <div class="step-ready"><span></span> listo para usar</div>
+      </div>
+
+      <section class="studio-panel reveal" aria-label="Herramientas de LushiTube">
+        <div class="deck-edge deck-edge-left" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="deck-edge deck-edge-right" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="deck-caption" aria-hidden="true"><span>LT / MEDIA DESK</span><span>SIGNAL READY</span></div>
+        <div class="studio-topbar">
+          <div class="mode-tabs" role="tablist" aria-label="Modo de trabajo">
+            <button class="main-tab active" id="tab-btn-download" data-tab="download" role="tab" aria-selected="true" type="button">
+              <span class="tab-number">01</span><svg class="tab-icon"><use href="#i-link"></use></svg><span>Desde URL</span>
+            </button>
+            <button class="main-tab" id="tab-btn-audio" data-tab="convert-audio" role="tab" aria-selected="false" type="button">
+              <span class="tab-number">02</span><svg class="tab-icon"><use href="#i-audio"></use></svg><span>Audio → MP3</span>
+            </button>
+            <button class="main-tab" id="tab-btn-video" data-tab="convert-video" role="tab" aria-selected="false" type="button">
+              <span class="tab-number">03</span><svg class="tab-icon"><use href="#i-video"></use></svg><span>Video → MP4</span>
+            </button>
+          </div>
+          <div class="service-status"><span></span> listo para usar</div>
+        </div>
+
+        <div class="tab-panel active" id="panel-download">
+          <div class="download-layout">
+            <div class="download-main" id="search-section">
+              <div class="platform-row" aria-label="Plataformas compatibles">
+                <button class="platform-btn active" data-platform="youtube" type="button"><span class="platform-icon youtube"><svg><use href="#i-play"></use></svg></span><span>YouTube</span></button>
+                <button class="platform-btn" data-platform="tiktok" type="button"><span class="platform-icon tiktok"><svg><use href="#i-tiktok"></use></svg></span><span>TikTok</span></button>
+                <button class="platform-btn" data-platform="instagram" type="button"><span class="platform-icon instagram"><svg><use href="#i-camera"></use></svg></span><span>Instagram</span></button>
+                <button class="platform-btn" data-platform="soundcloud" type="button"><span class="platform-icon soundcloud"><svg><use href="#i-cloud"></use></svg></span><span>SoundCloud</span></button>
+                <button class="platform-btn" data-platform="facebook" type="button"><span class="platform-icon facebook"><svg><use href="#i-facebook"></use></svg></span><span>Facebook</span></button>
+              </div>
+
+              <div class="url-box" id="url-box">
+                <div class="input-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <div class="url-input-wrap">
+                  <span class="url-icon" aria-hidden="true"><svg><use href="#i-link"></use></svg></span>
+                  <input id="url-input" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="Pega aquí el enlace del contenido..." aria-label="Enlace del contenido" oninput="handleInput(this)" onpaste="handlePaste(event)">
+                  <button id="btn-clear" class="icon-button clear-button" type="button" onclick="clearInput()" aria-label="Limpiar enlace"><svg><use href="#i-x"></use></svg></button>
+                </div>
+                <button class="primary-action magnetic" id="btn-fetch" type="button" onclick="fetchVideoInfo()">
+                  <span class="action-icon"><svg><use href="#i-bolt"></use></svg></span>
+                  <span class="action-label">Analizar enlace</span>
+                  <span class="action-spinner" aria-hidden="true"></span>
+                </button>
+              </div>
+
+              <div class="url-footnote">
+                <span>Usa únicamente contenido propio o con permiso de descarga.</span>
+                <button type="button" class="paste-link" id="paste-button"><svg><use href="#i-clipboard"></use></svg><span>Pegar desde portapapeles</span></button>
+              </div>
+
+              <div class="loader-area" id="loader-area" aria-live="polite">
+                <div class="skeleton-card">
+                  <div class="skeleton-thumb skeleton"></div>
+                  <div class="skeleton-lines">
+                    <span class="skeleton short"></span>
+                    <span class="skeleton long"></span>
+                    <span class="skeleton medium"></span>
+                  </div>
+                </div>
+                <p id="loader-text">Analizando el enlace…</p>
+              </div>
+              <p class="status-msg" id="status-msg" role="status" aria-live="polite"></p>
+            </div>
+
+            <article class="preview-card" id="preview-card" aria-live="polite">
+              <div class="preview-head">
+                <div class="preview-thumb-wrap">
+                  <img id="thumb-img" src="" alt="Vista previa del contenido">
+                  <div id="thumb-fallback" class="thumb-fallback">LT</div>
+                  <span id="video-duration" class="duration-badge">--:--</span>
+                </div>
+                <div class="preview-info">
+                  <span class="platform-badge" id="meta-platform-badge">Contenido</span>
+                  <h2 id="video-title">Contenido multimedia</h2>
+                  <p id="video-author">Selecciona un formato para continuar.</p>
+                </div>
+                <button class="icon-button" id="preview-close" type="button" aria-label="Cerrar vista previa"><svg><use href="#i-x"></use></svg></button>
+              </div>
+
+              <div class="format-grid" id="dl-grid">
+                <button class="format-card selected" data-format="mp3" type="button">
+                  <span class="format-icon"><svg><use href="#i-audio"></use></svg></span>
+                  <span><strong>MP3</strong><small>Audio · 320 kbps</small></span>
+                  <i class="format-state"><svg><use href="#i-check"></use></svg></i>
+                </button>
+                <button class="format-card" data-format="wav" type="button">
+                  <span class="format-icon"><svg><use href="#i-wave"></use></svg></span>
+                  <span><strong>WAV</strong><small>Audio sin compresión</small></span>
+                  <i class="format-state"><svg><use href="#i-download"></use></svg></i>
+                </button>
+                <button class="format-card" data-format="mp4" type="button">
+                  <span class="format-icon"><svg><use href="#i-video"></use></svg></span>
+                  <span><strong>MP4</strong><small>Video · mejor calidad</small></span>
+                  <i class="format-state"><svg><use href="#i-download"></use></svg></i>
+                </button>
+              </div>
+
+              <form id="form-url-mp3" class="download-form" onsubmit="event.preventDefault(); startDownload('mp3')"></form>
+              <form id="form-url-wav" class="download-form" onsubmit="event.preventDefault(); startDownload('wav')"></form>
+              <div id="form-mp4-wrapper"><form id="form-url-mp4" class="download-form" onsubmit="event.preventDefault(); startDownload('mp4')"></form></div>
+
+              <div class="download-cta-row">
+                <button class="download-now magnetic" id="download-now" type="button">
+                  <span class="button-icon"><svg><use href="#i-download"></use></svg></span><span class="button-label">Descargar MP3</span><b aria-hidden="true">→</b>
+                </button>
+                <button class="secondary-action" type="button" onclick="nuevaConversion(false)"><svg><use href="#i-refresh"></use></svg><span>Cambiar enlace</span></button>
+              </div>
+
+              <div class="progress-area" id="progress-area" data-state="loading" aria-live="polite" aria-atomic="true">
+                <div class="transfer-status-row">
+                  <div class="transfer-state-icon" id="transfer-state-icon" aria-hidden="true">
+                    <span class="state-spinner"></span>
+                    <span class="state-check"><svg><use href="#i-check"></use></svg></span>
+                    <span class="state-error">!</span>
+                  </div>
+                  <div class="transfer-status-copy">
+                    <span class="transfer-eyebrow" id="transfer-eyebrow">Preparando transferencia</span>
+                    <strong id="progress-label">Conectando con la fuente…</strong>
+                    <small id="progress-detail">Esperando información de la fuente.</small>
+                  </div>
+                  <div class="transfer-metrics">
+                    <span class="progress-percent" id="progress-pct">0%</span>
+                    <small id="progress-speed">—</small>
+                  </div>
+                </div>
+                <div class="transfer-visual">
+                  <div class="progress-track" role="progressbar" aria-label="Progreso de descarga" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="download-progress-track">
+                    <div id="progress-fill" class="progress-fill"><span></span></div>
+                  </div>
+                  <div class="transfer-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                </div>
+                <div class="progress-stages" aria-label="Etapas de la descarga">
+                  <span class="active" data-stage="connect"><i><svg><use href="#i-link"></use></svg></i><b>Fuente</b><small>Conectando</small></span>
+                  <span data-stage="download"><i><svg><use href="#i-download"></use></svg></i><b>Transferencia</b><small>Descargando</small></span>
+                  <span data-stage="process"><i><svg><use href="#i-wave"></use></svg></i><b>Procesado</b><small>Preparando archivo</small></span>
+                </div>
+                <div class="error-actions" id="download-error-actions">
+                  <button id="retry-download" type="button" class="secondary-action"><svg><use href="#i-refresh"></use></svg><span>Reintentar</span></button>
+                  <button id="change-link-error" type="button" class="text-action"><svg><use href="#i-link"></use></svg><span>Cambiar enlace</span></button>
+                </div>
+              </div>
+
+              <div class="success-panel" id="checkmark-download" aria-live="polite">
+                <span class="success-icon" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
+                <div class="success-copy">
+                  <span class="success-kicker">Completado</span>
+                  <strong>Tu descarga está lista</strong>
+                  <p id="download-success-file">El archivo se guardó en tu dispositivo.</p>
+                </div>
+                <div class="success-actions">
+                  <button id="download-again" type="button" class="secondary-action"><svg><use href="#i-refresh"></use></svg><span>Descargar de nuevo</span></button>
+                  <button id="new-download" type="button" class="primary-small"><svg><use href="#i-plus"></use></svg><span>Nueva descarga</span></button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-convert-audio">
+          <div class="converter-layout" id="conversor">
+            <div class="converter-copy">
+              <span class="section-kicker">Conversor de audio</span>
+              <h2>Pasa tus archivos a MP3 sin salir de la página.</h2>
+              <p>Arrastra un archivo compatible o selecciónalo desde tu dispositivo.</p>
+            </div>
+            <div class="drop-zone" id="drop-zone-audio" tabindex="0" role="button" aria-label="Seleccionar archivo de audio">
+              <input class="file-input-hidden" id="file-input-audio" type="file" accept="audio/*,video/*">
+              <div class="drop-icon"><svg><use href="#i-audio"></use></svg></div>
+              <div class="drop-zone-text"><h4>Suelta tu archivo aquí</h4><p>WAV, FLAC, AAC, M4A, OGG, OPUS y más</p></div>
+              <span class="browse-pill">Elegir archivo</span>
+            </div>
+            <button id="btn-convert-audio" class="convert-button magnetic" type="button" disabled onclick="startConversion('audio')"><svg><use href="#i-wave"></use></svg><span>Convertir a MP3</span></button>
+            <div class="convert-progress" id="convert-progress-audio" data-state="loading" aria-live="polite">
+              <div class="convert-state-row">
+                <span class="mini-spinner" aria-hidden="true"></span>
+                <div><small>Conversión de audio</small><strong id="convert-label-audio">Preparando archivo…</strong><em id="convert-detail-audio">Esperando al procesador.</em></div>
+                <span class="progress-percent" id="convert-pct-audio">0%</span>
+              </div>
+              <div class="progress-track" role="progressbar" aria-label="Progreso de conversión de audio" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="convert-track-audio"><div id="convert-fill-audio" class="progress-fill"></div></div>
+            </div>
+            <div class="conversion-success" id="checkmark-audio"><span>✓</span><div><strong>Conversión completada</strong><small>El MP3 se descargó en tu dispositivo.</small></div></div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-convert-video">
+          <div class="converter-layout">
+            <div class="converter-copy">
+              <span class="section-kicker">Conversor de video</span>
+              <h2>Convierte tus videos a MP4 con una salida compatible.</h2>
+              <p>Sube el archivo, deja que FFmpeg procese la conversión y descarga el resultado.</p>
+            </div>
+            <div class="drop-zone" id="drop-zone-video" tabindex="0" role="button" aria-label="Seleccionar archivo de video">
+              <input class="file-input-hidden" id="file-input-video" type="file" accept="video/*">
+              <div class="drop-icon"><svg><use href="#i-video"></use></svg></div>
+              <div class="drop-zone-text"><h4>Suelta tu video aquí</h4><p>AVI, MKV, MOV, WMV, WEBM, FLV y más</p></div>
+              <span class="browse-pill">Elegir archivo</span>
+            </div>
+            <button id="btn-convert-video" class="convert-button magnetic" type="button" disabled onclick="startConversion('video')"><svg><use href="#i-video"></use></svg><span>Convertir a MP4</span></button>
+            <div class="convert-progress" id="convert-progress-video" data-state="loading" aria-live="polite">
+              <div class="convert-state-row">
+                <span class="mini-spinner" aria-hidden="true"></span>
+                <div><small>Conversión de video</small><strong id="convert-label-video">Preparando archivo…</strong><em id="convert-detail-video">Esperando al procesador.</em></div>
+                <span class="progress-percent" id="convert-pct-video">0%</span>
+              </div>
+              <div class="progress-track" role="progressbar" aria-label="Progreso de conversión de video" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="convert-track-video"><div id="convert-fill-video" class="progress-fill"></div></div>
+            </div>
+            <div class="conversion-success" id="checkmark-video"><span>✓</span><div><strong>Conversión completada</strong><small>El MP4 se descargó en tu dispositivo.</small></div></div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="feature-section" id="caracteristicas">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <span class="section-index">02 / SISTEMA</span>
+          <span class="section-kicker">Hecho para volver a usarlo</span>
+          <h2>Una herramienta directa, rápida y visualmente clara.</h2>
+          <p>La interfaz prioriza lo importante: analizar, elegir y descargar.</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card reveal"><span>01</span><div class="feature-icon">↯</div><h3>Flujo rápido</h3><p>Estados claros desde el análisis hasta la descarga, sin pantallas intermedias innecesarias.</p></article>
+          <article class="feature-card reveal"><span>02</span><div class="feature-icon">◫</div><h3>Conversión integrada</h3><p>Audio a MP3 y video a MP4 desde el mismo espacio de trabajo.</p></article>
+          <article class="feature-card reveal"><span>03</span><div class="feature-icon">◌</div><h3>Respuesta visual</h3><p>Skeletons, progreso, confirmaciones y microinteracciones para saber siempre qué está pasando.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow-section">
+      <div class="shell workflow-grid">
+        <div class="workflow-copy reveal">
+          <span class="section-index">03 / FLUJO</span>
+          <span class="section-kicker">Tres pasos, nada más</span>
+          <h2>Del enlace al archivo sin perderte en el proceso.</h2>
+        </div>
+        <div class="workflow-list">
+          <div class="workflow-item reveal"><b>1</b><div><strong>Pega o sube</strong><p>Usa un enlace público o un archivo local.</p></div></div>
+          <div class="workflow-item reveal"><b>2</b><div><strong>Elige formato</strong><p>MP3, WAV o MP4 según lo que necesites.</p></div></div>
+          <div class="workflow-item reveal"><b>3</b><div><strong>Descarga</strong><p>Repite o inicia una nueva descarga al terminar.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="faq-section" id="faq">
+      <div class="shell faq-layout">
+        <div class="section-heading reveal">
+          <span class="section-index">04 / AYUDA</span>
+          <span class="section-kicker">Preguntas frecuentes</span>
+          <h2>Lo esencial, sin letra pequeña visual.</h2>
+        </div>
+        <div class="faq-list">
+          <details class="faq-item reveal"><summary>¿Necesito crear una cuenta?<span>+</span></summary><p>No. La interfaz no requiere registro para usar las herramientas disponibles en esta versión.</p></details>
+          <details class="faq-item reveal"><summary>¿Qué puedo descargar?<span>+</span></summary><p>Utiliza LushiTube únicamente con contenido propio, de dominio público o para el que tengas permiso de descarga.</p></details>
+          <details class="faq-item reveal"><summary>¿Qué pasa cuando termina una descarga?<span>+</span></summary><p>La interfaz muestra el estado completado y ofrece dos acciones claras: descargar de nuevo o iniciar una nueva descarga.</p></details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <div class="footer-brand"><img src="{{ url_for('static', filename='img/Lushitube.png') }}" alt="LushiTube"><span>LushiTube Studio</span></div>
+      <p>Herramienta para contenido propio o autorizado.</p>
+      <nav aria-label="Enlaces legales"><a href="{{ url_for('terminos') }}">Términos</a><a href="{{ url_for('privacidad') }}">Privacidad</a></nav>
+    </div>
+  </footer>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}" defer></script>
+</body>
+</html>
