@@ -7,6 +7,7 @@ import uuid
 import threading
 import shutil
 import re
+import socket
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib.parse import urlparse
@@ -67,6 +68,37 @@ def _probe_duration(path):
     except Exception:
         pass
     return None
+
+
+def _probe_stream_types(path):
+    """Devuelve los tipos de stream detectados por ffprobe (audio/video)."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type',
+             '-of', 'csv=p=0', path],
+            capture_output=True, text=True, timeout=20
+        )
+        if result.returncode == 0:
+            return {line.strip().lower() for line in (result.stdout or '').splitlines() if line.strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def _pot_server_available(host='127.0.0.1', port=4416):
+    """Comprueba rápidamente si el proveedor local de PO Token está escuchando."""
+    try:
+        with socket.create_connection((host, port), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
+def _youtube_pot_extractor_args():
+    return {
+        'youtube': {'player_client': ['mweb']},
+        'youtubepot-bgutilhttp': {'base_url': ['http://127.0.0.1:4416']},
+    }
 
 
 def _run_ffmpeg_with_progress(cmd, duration, uid, label):
@@ -137,6 +169,17 @@ def is_valid_public_url(value):
         return parsed.scheme in {'http', 'https'} and bool(parsed.netloc)
     except ValueError:
         return False
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'ok': True,
+        'ffmpeg': bool(shutil.which('ffmpeg')),
+        'ffprobe': bool(shutil.which('ffprobe')),
+        'js_runtime': next(iter(JS_RUNTIMES), None) if 'JS_RUNTIMES' in globals() else None,
+        'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
+    })
+
 
 # ===== RUTAS DE PÁGINAS =====
 @app.route('/')
@@ -251,22 +294,12 @@ def _is_http_403(exc):
 
 
 def _po_provider_config():
-    """Detecta la instalación opcional del proveedor de PO Tokens recomendado por yt-dlp."""
+    """True cuando el plugin y el servidor local de PO Token están disponibles."""
     try:
         importlib_metadata.version('bgutil-ytdlp-pot-provider')
-    except importlib_metadata.PackageNotFoundError:
-        return None
     except Exception:
-        return None
-
-    server_home = os.path.join(os.path.expanduser('~'), 'bgutil-ytdlp-pot-provider', 'server')
-    candidates = [
-        os.path.join(server_home, 'build', 'generate_once.js'),
-        os.path.join(server_home, 'src', 'main.ts'),
-    ]
-    if not any(os.path.isfile(path) for path in candidates):
-        return None
-    return server_home
+        return False
+    return _pot_server_available()
 
 
 def _reset_job_dir(job_dir):
@@ -305,24 +338,19 @@ def _find_download_result(job_dir, formato):
 
 
 def _youtube_retry_profiles(formato):
-    """Perfiles de recuperación para los 403 recientes de YouTube.
-
-    1) PO Token si el usuario instaló el proveedor recomendado.
-    2) web_safari + HLS, que evita GVS con PO Token en muchos vídeos públicos.
-    3) format 18 como último modo de compatibilidad (calidad limitada).
-    """
+    """Perfiles de recuperación para YouTube, priorizando PO Token en la nube."""
     profiles = []
-    po_home = _po_provider_config()
-    if po_home:
+    if _po_provider_config():
         profiles.append({
-            'name': 'po-token',
-            'label': 'Verificando reproducción con YouTube…',
-            'detail': 'Usando el proveedor local de PO Token.',
-            'extractor_args': {
-                'youtube': {'player_client': ['mweb']},
-                'youtubepot-bgutilscript': {'server_home': [po_home]},
-            },
-            'format': 'bestaudio[acodec!=none]/bestaudio/best' if formato in {'mp3', 'wav'} else 'bv*+ba/b',
+            'name': 'po-token-mweb',
+            'label': 'Verificando reproducción segura con YouTube…',
+            'detail': 'Generando un PO Token temporal para la transferencia.',
+            'extractor_args': _youtube_pot_extractor_args(),
+            'format': (
+                'bestaudio[acodec!=none]/best[acodec!=none]/18'
+                if formato in {'mp3', 'wav'}
+                else 'best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/bv*+ba/b'
+            ),
         })
 
     hls_format = (
@@ -333,14 +361,14 @@ def _youtube_retry_profiles(formato):
     profiles.append({
         'name': 'web-safari-hls',
         'label': 'Cambiando a una ruta de reproducción compatible…',
-        'detail': 'YouTube rechazó el flujo directo; probando HLS seguro.',
+        'detail': 'El flujo principal fue rechazado; probando HLS.',
         'extractor_args': {'youtube': {'player_client': ['web_safari']}},
         'format': hls_format,
     })
     profiles.append({
         'name': 'compat-18',
         'label': 'Aplicando modo de compatibilidad…',
-        'detail': 'Último intento con un formato combinado ampliamente compatible.',
+        'detail': 'Último intento con un formato combinado.',
         'extractor_args': {'youtube': {'player_client': ['android_vr']}},
         'format': '18',
     })
@@ -354,9 +382,9 @@ def _friendly_download_error(exc):
         if not JS_RUNTIMES:
             return ('YouTube rechazó la descarga (403). Falta un runtime JavaScript compatible. '
                     'Instala Deno 2.3+ o Node.js 22+ y reinicia LushiTube.')
-        return ('YouTube rechazó las rutas de reproducción disponibles (403). '
-                'LushiTube ya intentó rutas alternativas. Para máxima compatibilidad ejecuta '
-                'INSTALAR_COMPATIBILIDAD_YOUTUBE.bat una sola vez y reinicia la aplicación.')
+        return ('YouTube rechazó temporalmente las rutas de reproducción disponibles (403). '
+                'LushiTube ya probó PO Token y rutas alternativas. Intenta de nuevo en unos minutos '
+                'o prueba otro contenido público.')
     if 'sign in' in lowered or 'login' in lowered or 'cookies' in lowered:
         return 'Ese contenido requiere autenticación y no puede descargarse como enlace público.'
     if 'private video' in lowered or 'video unavailable' in lowered:
@@ -372,24 +400,42 @@ def obtener_info():
         return jsonify({'error': 'Ingresa una URL http o https válida.'}), 400
 
     try:
-        ydl_opts = get_base_ydl_opts()
-        ydl_opts['skip_download'] = True
+        attempts = [None]
+        if _is_youtube_url(url) and _po_provider_config():
+            attempts.insert(0, _youtube_pot_extractor_args())
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            duracion_segundos = info.get('duration') or 0
-            minutos, segundos = divmod(int(duracion_segundos), 60)
-            thumbnail_url = info.get('thumbnail') or (
-                info.get('thumbnails', [{}])[-1].get('url', '') if info.get('thumbnails') else ''
-            )
-            return jsonify({
-                'title': info.get('title', 'Contenido multimedia'),
-                'thumbnail': thumbnail_url,
-                'duration': f"{minutos:02d}:{segundos:02d}",
-                'platform': info.get('extractor_key', '').lower(),
-                'runtime_ready': bool(JS_RUNTIMES),
-                'runtime': next(iter(JS_RUNTIMES), None)
-            })
+        info = None
+        last_exc = None
+        for extractor_args in attempts:
+            try:
+                ydl_opts = get_base_ydl_opts()
+                ydl_opts['skip_download'] = True
+                if extractor_args:
+                    ydl_opts['extractor_args'] = extractor_args
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None or info is None:
+            raise last_exc or RuntimeError('No se pudo obtener metadata')
+
+        duracion_segundos = info.get('duration') or 0
+        minutos, segundos = divmod(int(duracion_segundos), 60)
+        thumbnail_url = info.get('thumbnail') or (
+            info.get('thumbnails', [{}])[-1].get('url', '') if info.get('thumbnails') else ''
+        )
+        return jsonify({
+            'title': info.get('title', 'Contenido multimedia'),
+            'thumbnail': thumbnail_url,
+            'duration': f"{minutos:02d}:{segundos:02d}",
+            'platform': info.get('extractor_key', '').lower(),
+            'runtime_ready': bool(JS_RUNTIMES),
+            'runtime': next(iter(JS_RUNTIMES), None),
+            'pot_ready': _po_provider_config(),
+        })
     except Exception as exc:
         app.logger.warning('No se pudo obtener metadata: %s', exc)
         return jsonify({'error': 'No se pudo leer ese enlace. Puede ser privado, no compatible o requerir autenticación.'}), 422
@@ -484,10 +530,8 @@ def descargar():
         if formato == 'mp3':
             opts.update({
                 'format': 'bestaudio[acodec!=none]/bestaudio/best',
-                'writethumbnail': True,
                 'postprocessors': [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'},
-                    {'key': 'EmbedThumbnail'},
                 ],
             })
         elif formato == 'wav':
@@ -513,7 +557,8 @@ def descargar():
     try:
         attempts = [None]
         if _is_youtube_url(url):
-            attempts.extend(_youtube_retry_profiles(formato))
+            profiles = _youtube_retry_profiles(formato)
+            attempts = profiles + [None] if any(p['name'] == 'po-token-mweb' for p in profiles) else [None] + profiles
 
         last_exc = None
         info = None
@@ -608,10 +653,10 @@ def convertir_audio():
     
     # Extensiones de audio permitidas
     ext = archivo.filename.rsplit('.', 1)[-1].lower() if '.' in archivo.filename else ''
-    extensiones_validas = {'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma', 'opus', 'webm', 'mp4', 'avi', 'mkv', 'mov'}
+    extensiones_validas = {'mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'aif', 'ac3', 'amr', 'mp2', 'mka'}
     
     if ext not in extensiones_validas:
-        return jsonify({'error': f'Formato .{ext} no soportado. Usa: WAV, OGG, FLAC, AAC, M4A, WMA, OPUS'}), 400
+        return jsonify({'error': f"Formato .{ext or 'desconocido'} no soportado. Usa MP3, WAV, FLAC, AAC, M4A, OGG, OPUS, WMA, AIFF, AC3, AMR o MKA."}), 400
     
     try:
         # Guardar archivo temporal
@@ -621,7 +666,15 @@ def convertir_audio():
         output_path = os.path.join(CONVERT_FOLDER, f'{nombre_base}_{temp_id}.mp3')
         
         archivo.save(input_path)
-        
+
+        streams = _probe_stream_types(input_path)
+        if 'audio' not in streams:
+            try:
+                os.remove(input_path)
+            except OSError:
+                pass
+            return jsonify({'error': 'El archivo seleccionado no contiene una pista de audio válida.'}), 400
+
         duration = _probe_duration(input_path)
         if uid:
             convert_progress[uid] = {
@@ -694,10 +747,10 @@ def convertir_video():
     
     # Extensiones de video permitidas
     ext = archivo.filename.rsplit('.', 1)[-1].lower() if '.' in archivo.filename else ''
-    extensiones_validas = {'avi', 'mkv', 'mov', 'wmv', 'webm', 'flv', 'ts', 'm4v', '3gp', 'ogv', 'mpg', 'mpeg'}
+    extensiones_validas = {'mp4', 'avi', 'mkv', 'mov', 'wmv', 'webm', 'flv', 'ts', 'mts', 'm2ts', 'm4v', '3gp', 'ogv', 'mpg', 'mpeg'}
     
     if ext not in extensiones_validas:
-        return jsonify({'error': f'Formato .{ext} no soportado. Usa: AVI, MKV, MOV, WMV, WEBM, FLV'}), 400
+        return jsonify({'error': f"Formato .{ext or 'desconocido'} no soportado. Usa MP4, AVI, MKV, MOV, WMV, WEBM, FLV, MTS, M2TS, MPEG o 3GP."}), 400
     
     try:
         # Guardar archivo temporal
@@ -707,7 +760,15 @@ def convertir_video():
         output_path = os.path.join(CONVERT_FOLDER, f'{nombre_base}_{temp_id}.mp4')
         
         archivo.save(input_path)
-        
+
+        streams = _probe_stream_types(input_path)
+        if 'video' not in streams:
+            try:
+                os.remove(input_path)
+            except OSError:
+                pass
+            return jsonify({'error': 'El archivo seleccionado no contiene una pista de video válida.'}), 400
+
         duration = _probe_duration(input_path)
         if uid:
             convert_progress[uid] = {

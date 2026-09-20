@@ -3,7 +3,7 @@ services:
     name: lushitube
     runtime: docker
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: PYTHONUNBUFFERED

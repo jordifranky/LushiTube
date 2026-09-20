@@ -2,3 +2,4 @@ Flask>=3.0,<4
 Werkzeug>=3.0,<4
 yt-dlp[default,curl-cffi]>=2026.8.19
 gunicorn>=23,<24
+bgutil-ytdlp-pot-provider==2.0.0

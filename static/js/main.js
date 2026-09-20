@@ -593,6 +593,23 @@ function handleFileSelect(type) {
   const file = input?.files?.[0];
   if (!file) return;
 
+  const audioExts = new Set(['mp3','wav','flac','aac','m4a','ogg','oga','opus','wma','aiff','aif','ac3','amr','mp2','mka']);
+  const videoExts = new Set(['mp4','avi','mkv','mov','wmv','webm','flv','ts','mts','m2ts','m4v','3gp','ogv','mpg','mpeg']);
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  const valid = type === 'audio'
+    ? (file.type.startsWith('audio/') || audioExts.has(ext))
+    : (file.type.startsWith('video/') || videoExts.has(ext));
+  if (!valid) {
+    input.value = '';
+    zone?.classList.remove('has-file');
+    const copy = $('.drop-zone-text', zone);
+    if (copy) copy.innerHTML = type === 'audio'
+      ? '<h4>Ese archivo no parece ser audio</h4><p>Usa MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, WMA o AIFF.</p>'
+      : '<h4>Ese archivo no parece ser video</h4><p>Usa MP4, AVI, MKV, MOV, WEBM, WMV, FLV o MPEG.</p>';
+    if (button) button.disabled = true;
+    return;
+  }
+
   zone?.classList.add('has-file');
   const size = file.size >= 1024 * 1024 ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(file.size / 1024))} KB`;
   if (copy) copy.innerHTML = `<h4>${escapeHtml(file.name)}</h4><p>${size} · listo para convertir</p>`;
