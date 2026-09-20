@@ -172,11 +172,21 @@ def is_valid_public_url(value):
 
 @app.route('/health')
 def health():
+    try:
+        pot_plugin = importlib_metadata.version('bgutil-ytdlp-pot-provider')
+    except Exception:
+        pot_plugin = None
+    try:
+        ytdlp_version = importlib_metadata.version('yt-dlp')
+    except Exception:
+        ytdlp_version = None
     return jsonify({
         'ok': True,
         'ffmpeg': bool(shutil.which('ffmpeg')),
         'ffprobe': bool(shutil.which('ffprobe')),
         'js_runtime': next(iter(JS_RUNTIMES), None) if 'JS_RUNTIMES' in globals() else None,
+        'yt_dlp': ytdlp_version,
+        'pot_plugin': pot_plugin,
         'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
     })
 
@@ -277,6 +287,18 @@ def get_base_ydl_opts():
     }
     if JS_RUNTIMES:
         opts['js_runtimes'] = JS_RUNTIMES
+    return opts
+
+
+def get_info_ydl_opts():
+    """Opciones ligeras para metadata: no valida URLs de medios ni descarga formatos."""
+    opts = get_base_ydl_opts()
+    opts.pop('check_formats', None)
+    opts.update({
+        'skip_download': True,
+        'ignore_no_formats_error': True,
+        'extract_flat': False,
+    })
     return opts
 
 
@@ -400,24 +422,34 @@ def obtener_info():
         return jsonify({'error': 'Ingresa una URL http o https válida.'}), 400
 
     try:
-        attempts = [None]
-        if _is_youtube_url(url) and _po_provider_config():
-            attempts.insert(0, _youtube_pot_extractor_args())
+        # Para metadata no comprobamos formatos descargables. En IPs cloud esa
+        # validación puede provocar un 403 aun cuando título/miniatura sí son legibles.
+        attempts = [('default', None)]
+        if _is_youtube_url(url):
+            if _po_provider_config():
+                attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
+            attempts.extend([
+                ('web-safari', {'youtube': {'player_client': ['web_safari']}}),
+                ('android-vr', {'youtube': {'player_client': ['android_vr']}}),
+            ])
 
         info = None
         last_exc = None
-        for extractor_args in attempts:
+        used_profile = 'default'
+        for profile_name, extractor_args in attempts:
             try:
-                ydl_opts = get_base_ydl_opts()
-                ydl_opts['skip_download'] = True
+                ydl_opts = get_info_ydl_opts()
                 if extractor_args:
                     ydl_opts['extractor_args'] = extractor_args
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                last_exc = None
-                break
+                if info:
+                    used_profile = profile_name
+                    last_exc = None
+                    break
             except Exception as exc:
                 last_exc = exc
+                app.logger.warning('Metadata falló (perfil=%s): %s', profile_name, exc)
                 continue
         if last_exc is not None or info is None:
             raise last_exc or RuntimeError('No se pudo obtener metadata')
@@ -435,6 +467,7 @@ def obtener_info():
             'runtime_ready': bool(JS_RUNTIMES),
             'runtime': next(iter(JS_RUNTIMES), None),
             'pot_ready': _po_provider_config(),
+            'info_profile': used_profile,
         })
     except Exception as exc:
         app.logger.warning('No se pudo obtener metadata: %s', exc)
