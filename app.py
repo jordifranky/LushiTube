@@ -8,6 +8,7 @@ import threading
 import shutil
 import re
 import socket
+import base64
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,6 +25,38 @@ os.makedirs(CONVERT_FOLDER, exist_ok=True)
 
 progress_data = {}
 convert_progress = {}
+
+# Configuración opcional para despliegues cloud.
+# YTDLP_PROXY puede apuntar a un proxy propio si el proveedor cloud bloquea YouTube.
+# YOUTUBE_COOKIES_B64 acepta un cookies.txt de YouTube codificado en base64.
+# No se requiere para enlaces públicos y, por seguridad, se mantiene desactivado por defecto.
+YTDLP_PROXY = (os.environ.get('YTDLP_PROXY') or '').strip()
+YOUTUBE_COOKIES_B64 = (os.environ.get('YOUTUBE_COOKIES_B64') or '').strip()
+YOUTUBE_COOKIE_FILE = None
+
+
+def _prepare_youtube_cookie_file():
+    global YOUTUBE_COOKIE_FILE
+    if not YOUTUBE_COOKIES_B64:
+        return None
+    path = '/tmp/lushitube-youtube-cookies.txt'
+    try:
+        payload = base64.b64decode(YOUTUBE_COOKIES_B64, validate=True)
+        text = payload.decode('utf-8-sig').replace('\r\n', '\n')
+        first = text.splitlines()[0].strip() if text.splitlines() else ''
+        if first not in {'# Netscape HTTP Cookie File', '# HTTP Cookie File'}:
+            raise ValueError('Formato cookies.txt inválido')
+        Path(path).write_text(text, encoding='utf-8', newline='\n')
+        os.chmod(path, 0o600)
+        YOUTUBE_COOKIE_FILE = path
+        return path
+    except Exception:
+        app.logger.warning('YOUTUBE_COOKIES_B64 está definido, pero no pudo cargarse. Se ignorará.')
+        YOUTUBE_COOKIE_FILE = None
+        return None
+
+
+_prepare_youtube_cookie_file()
 
 
 def _human_bytes(value):
@@ -180,14 +213,28 @@ def health():
         ytdlp_version = importlib_metadata.version('yt-dlp')
     except Exception:
         ytdlp_version = None
+    try:
+        curl_cffi_version = importlib_metadata.version('curl-cffi')
+    except Exception:
+        curl_cffi_version = None
+    try:
+        ejs_version = importlib_metadata.version('yt-dlp-ejs')
+    except Exception:
+        ejs_version = None
+
     return jsonify({
         'ok': True,
         'ffmpeg': bool(shutil.which('ffmpeg')),
         'ffprobe': bool(shutil.which('ffprobe')),
         'js_runtime': next(iter(JS_RUNTIMES), None) if 'JS_RUNTIMES' in globals() else None,
         'yt_dlp': ytdlp_version,
+        'yt_dlp_ejs': ejs_version,
+        'curl_cffi': curl_cffi_version,
         'pot_plugin': pot_plugin,
         'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
+        'proxy_configured': bool(YTDLP_PROXY),
+        'youtube_cookies_configured': bool(YOUTUBE_COOKIE_FILE),
+        'youtube_cloud_mode': 'multi-route-v4',
     })
 
 
@@ -274,19 +321,24 @@ JS_RUNTIMES = detect_js_runtimes()
 
 
 def get_base_ydl_opts():
-    # No forzamos player_client ni desactivamos JavaScript. Esos "hacks" provocaban
-    # formatos 403 en YouTube moderno. yt-dlp decide el cliente apropiado.
+    # Ajustes conservadores para entornos cloud. IPv4 ayuda con algunos 403 inmediatos
+    # y sleep_interval_requests reduce el riesgo de activar límites por ráfagas.
     opts = {
         'quiet': True,
         'noplaylist': True,
-        'retries': 3,
-        'fragment_retries': 3,
+        'retries': 4,
+        'fragment_retries': 4,
+        'extractor_retries': 2,
         'file_access_retries': 2,
-        'socket_timeout': 25,
+        'socket_timeout': 28,
         'check_formats': 'selected',
+        'source_address': '0.0.0.0',  # equivalente a --force-ipv4
+        'sleep_interval_requests': 0.75,
     }
     if JS_RUNTIMES:
         opts['js_runtimes'] = JS_RUNTIMES
+    if YTDLP_PROXY:
+        opts['proxy'] = YTDLP_PROXY
     return opts
 
 
@@ -313,6 +365,35 @@ def _is_youtube_url(value):
 def _is_http_403(exc):
     text = str(exc).lower()
     return 'http error 403' in text or '403: forbidden' in text or 'forbidden' in text
+
+
+def _is_youtube_retryable(exc):
+    """Errores que pueden variar según el cliente de YouTube o la ruta de playback."""
+    text = str(exc).lower()
+    markers = (
+        'http error 403', '403: forbidden', 'forbidden',
+        'sign in to confirm you', "confirm you\'re not a bot", 'not a bot',
+        'login required', 'authentication required', 'cookies',
+        'video unavailable', 'not available on this app', 'no video formats found',
+        'requested format is not available', 'only images are available',
+        'player response', 'challenge solving failed',
+    )
+    return any(marker in text for marker in markers)
+
+
+def _youtube_error_code(exc):
+    text = str(exc).lower()
+    if 'sign in to confirm' in text or 'not a bot' in text:
+        return 'youtube-cloud-block'
+    if 'http error 403' in text or '403: forbidden' in text or 'forbidden' in text:
+        return 'youtube-403'
+    if 'private video' in text or 'members-only' in text:
+        return 'youtube-private'
+    if 'login required' in text or 'authentication required' in text:
+        return 'youtube-auth'
+    if 'no video formats found' in text or 'only images are available' in text:
+        return 'youtube-no-formats'
+    return 'download-error'
 
 
 def _po_provider_config():
@@ -360,57 +441,103 @@ def _find_download_result(job_dir, formato):
 
 
 def _youtube_retry_profiles(formato):
-    """Perfiles de recuperación para YouTube, priorizando PO Token en la nube."""
+    """
+    Rutas de YouTube ordenadas por compatibilidad actual. No todas funcionarán
+    desde todas las IP de datacenter; por eso se prueban de manera automática.
+    """
+    audio = formato in {'mp3', 'wav'}
     profiles = []
+
     if _po_provider_config():
         profiles.append({
             'name': 'po-token-mweb',
-            'label': 'Verificando reproducción segura con YouTube…',
-            'detail': 'Generando un PO Token temporal para la transferencia.',
+            'public_name': 'PO Token · mweb',
+            'label': 'Validando la sesión de reproducción…',
+            'detail': 'Generando un PO Token temporal para YouTube.',
             'extractor_args': _youtube_pot_extractor_args(),
-            'format': (
-                'bestaudio[acodec!=none]/best[acodec!=none]/18'
-                if formato in {'mp3', 'wav'}
-                else 'best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/bv*+ba/b'
-            ),
+            'format': 'bestaudio[acodec!=none]/best[acodec!=none]/18' if audio else 'bv*+ba/b',
+            'opts': {'impersonate': 'chrome'},
         })
 
-    hls_format = (
-        'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/18'
-        if formato in {'mp3', 'wav'}
-        else 'best[protocol*=m3u8][vcodec!=none][acodec!=none]/best[protocol*=m3u8]/18'
-    )
+    # web_safari expone HLS que actualmente puede funcionar sin PO Token GVS.
     profiles.append({
         'name': 'web-safari-hls',
-        'label': 'Cambiando a una ruta de reproducción compatible…',
-        'detail': 'El flujo principal fue rechazado; probando HLS.',
+        'public_name': 'HLS · Safari',
+        'label': 'Probando reproducción HLS…',
+        'detail': 'La ruta principal fue rechazada; probando un flujo HLS compatible.',
         'extractor_args': {'youtube': {'player_client': ['web_safari']}},
-        'format': hls_format,
+        'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/18' if audio else 'best[protocol*=m3u8]/18',
+        'opts': {'impersonate': 'safari'},
     })
+
+    # web_embedded no exige PO Token, aunque solo funciona en videos embebibles.
     profiles.append({
-        'name': 'compat-18',
-        'label': 'Aplicando modo de compatibilidad…',
-        'detail': 'Último intento con un formato combinado.',
-        'extractor_args': {'youtube': {'player_client': ['android_vr']}},
-        'format': '18',
+        'name': 'web-embedded',
+        'public_name': 'Embedded',
+        'label': 'Probando reproductor embebido…',
+        'detail': 'Intentando una sesión sin PO Token para contenido embebible.',
+        'extractor_args': {'youtube': {'player_client': ['web_embedded']}},
+        'format': 'bestaudio/best' if audio else 'bv*+ba/b',
+        'opts': {'impersonate': 'chrome'},
     })
+
+    # visionos forma parte de los clientes por defecto actuales de yt-dlp.
+    profiles.append({
+        'name': 'visionos',
+        'public_name': 'VisionOS',
+        'label': 'Cambiando de cliente de reproducción…',
+        'detail': 'Probando un cliente alternativo mantenido por yt-dlp.',
+        'extractor_args': {'youtube': {'player_client': ['visionos']}},
+        'format': 'bestaudio/best' if audio else 'bv*+ba/b',
+        'opts': {},
+    })
+
+    # Última ruta sin PO Token para algunos videos públicos.
+    profiles.append({
+        'name': 'android-vr',
+        'public_name': 'Android VR',
+        'label': 'Aplicando modo de compatibilidad…',
+        'detail': 'Último cliente público antes de abandonar la transferencia.',
+        'extractor_args': {'youtube': {'player_client': ['android_vr']}},
+        'format': 'bestaudio/best/18' if audio else '18/best',
+        'opts': {},
+    })
+
+    # Autenticación opcional. Solo se usa si el propietario del despliegue añadió
+    # YOUTUBE_COOKIES_B64 de forma explícita en Render.
+    if YOUTUBE_COOKIE_FILE:
+        profiles.append({
+            'name': 'cookies',
+            'public_name': 'Sesión autorizada',
+            'label': 'Probando sesión autorizada…',
+            'detail': 'Usando la sesión privada configurada por el propietario del servidor.',
+            'extractor_args': {},
+            'format': 'bestaudio/best' if audio else 'bv*+ba/b',
+            'opts': {'cookiefile': YOUTUBE_COOKIE_FILE},
+        })
+
     return profiles
 
 
 def _friendly_download_error(exc):
     message = str(exc)
     lowered = message.lower()
-    if 'http error 403' in lowered or 'forbidden' in lowered:
-        if not JS_RUNTIMES:
-            return ('YouTube rechazó la descarga (403). Falta un runtime JavaScript compatible. '
-                    'Instala Deno 2.3+ o Node.js 22+ y reinicia LushiTube.')
-        return ('YouTube rechazó temporalmente las rutas de reproducción disponibles (403). '
-                'LushiTube ya probó PO Token y rutas alternativas. Intenta de nuevo en unos minutos '
-                'o prueba otro contenido público.')
-    if 'sign in' in lowered or 'login' in lowered or 'cookies' in lowered:
-        return 'Ese contenido requiere autenticación y no puede descargarse como enlace público.'
-    if 'private video' in lowered or 'video unavailable' in lowered:
-        return 'El contenido no está disponible públicamente o es privado.'
+    code = _youtube_error_code(exc)
+
+    if code == 'youtube-cloud-block':
+        return (
+            'YouTube bloqueó la sesión anónima del servidor cloud. El enlace puede ser público; '
+            'el bloqueo suele depender de la IP de Render. LushiTube probó varias rutas de reproducción.'
+        )
+    if code == 'youtube-403':
+        return (
+            'YouTube rechazó las rutas de reproducción del servidor (403). '
+            'LushiTube ya probó PO Token, HLS y clientes alternativos.'
+        )
+    if code in {'youtube-auth', 'youtube-private'}:
+        return 'Ese contenido requiere una sesión autorizada o no está disponible públicamente.'
+    if code == 'youtube-no-formats':
+        return 'YouTube no entregó formatos reproducibles a este servidor. Prueba de nuevo o usa otro contenido público.'
     return 'No se pudo completar la descarga. Verifica el enlace y vuelve a intentarlo.'
 
 # ===== INFO DEL VIDEO =====
@@ -429,7 +556,9 @@ def obtener_info():
             if _po_provider_config():
                 attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
             attempts.extend([
+                ('web-embedded', {'youtube': {'player_client': ['web_embedded']}}),
                 ('web-safari', {'youtube': {'player_client': ['web_safari']}}),
+                ('visionos', {'youtube': {'player_client': ['visionos']}}),
                 ('android-vr', {'youtube': {'player_client': ['android_vr']}}),
             ])
 
@@ -497,6 +626,23 @@ def descargar():
     job_dir = os.path.join(DOWNLOAD_FOLDER, f'job_{secure_filename(uid)}')
     _reset_job_dir(job_dir)
 
+    # Contexto compartido entre los reintentos de YouTube y los hooks de yt-dlp.
+    # Así /status conserva qué ruta está activa incluso cuando ya empezó a transferir bytes.
+    attempt_context = {
+        'attempt': 1,
+        'attempt_total': 1,
+        'route': 'Auto',
+        'retrying': False,
+    }
+
+    def _attempt_meta():
+        return {
+            'attempt': attempt_context.get('attempt', 1),
+            'attempt_total': attempt_context.get('attempt_total', 1),
+            'route': attempt_context.get('route', 'Auto'),
+            'retrying': bool(attempt_context.get('retrying')),
+        }
+
     def my_hook(d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
@@ -519,6 +665,7 @@ def descargar():
                 'total': _human_bytes(total),
                 'eta': _eta_text(d.get('eta')) if d.get('eta') is not None else '',
                 'done': False,
+                **_attempt_meta(),
             }
         elif d['status'] == 'finished':
             progress_data[uid] = {
@@ -528,6 +675,7 @@ def descargar():
                 'detail': 'La descarga terminó; falta procesar el formato final.',
                 'speed': '',
                 'done': False,
+                **_attempt_meta(),
             }
 
     def my_pp_hook(d):
@@ -540,6 +688,7 @@ def descargar():
                 'detail': 'Procesamiento local del archivo final.',
                 'speed': '',
                 'done': False,
+                **_attempt_meta(),
             }
         elif d['status'] == 'finished':
             progress_data[uid] = {
@@ -549,6 +698,7 @@ def descargar():
                 'detail': 'Últimos ajustes antes de enviarlo al navegador.',
                 'speed': '',
                 'done': False,
+                **_attempt_meta(),
             }
 
     def build_options(profile=None):
@@ -581,34 +731,65 @@ def descargar():
 
         if profile:
             opts['format'] = profile['format']
-            opts['extractor_args'] = profile['extractor_args']
-            # HLS y format 18 ya vienen combinados; no hace falta pedir múltiples fragmentos agresivamente.
-            if profile['name'] in {'web-safari-hls', 'compat-18'}:
+            if profile.get('extractor_args'):
+                opts['extractor_args'] = profile['extractor_args']
+            opts.update(profile.get('opts') or {})
+            if profile['name'] in {'web-safari-hls', 'android-vr'}:
                 opts['concurrent_fragment_downloads'] = 2
         return opts
 
     try:
         attempts = [None]
-        if _is_youtube_url(url):
+        is_youtube = _is_youtube_url(url)
+        if is_youtube:
+            # En cloud empezamos por mweb+PO Token cuando está disponible y después
+            # recorremos rutas alternativas. El perfil directo queda como último intento.
             profiles = _youtube_retry_profiles(formato)
-            attempts = profiles + [None] if any(p['name'] == 'po-token-mweb' for p in profiles) else [None] + profiles
+            attempts = profiles + [None] if profiles else [None]
 
         last_exc = None
         info = None
         used_profile = 'direct'
+        total_attempts = len(attempts)
 
         for attempt_no, profile in enumerate(attempts):
             if attempt_no > 0:
                 _reset_job_dir(job_dir)
+
+            public_name = (profile.get('public_name') or profile['name']) if profile else 'Auto'
+            attempt_context.update({
+                'attempt': attempt_no + 1,
+                'attempt_total': total_attempts,
+                'route': public_name,
+                'retrying': attempt_no > 0,
+            })
+
+            if profile:
                 used_profile = profile['name']
                 progress_data[uid] = {
                     'status': profile['label'],
-                    'percent': 7 + min(attempt_no, 3) * 2,
+                    'percent': min(16, 5 + attempt_no * 2),
                     'stage': 'connect',
                     'detail': profile['detail'],
                     'speed': '',
-                    'retrying': True,
+                    'retrying': attempt_no > 0,
                     'attempt': attempt_no + 1,
+                    'attempt_total': total_attempts,
+                    'route': public_name,
+                    'done': False,
+                }
+            elif is_youtube:
+                used_profile = 'direct'
+                progress_data[uid] = {
+                    'status': 'Probando configuración automática de yt-dlp…',
+                    'percent': min(18, 7 + attempt_no * 2),
+                    'stage': 'connect',
+                    'detail': 'Último intento con los clientes por defecto de la versión actual.',
+                    'speed': '',
+                    'retrying': attempt_no > 0,
+                    'attempt': attempt_no + 1,
+                    'attempt_total': total_attempts,
+                    'route': 'Auto',
                     'done': False,
                 }
 
@@ -620,12 +801,11 @@ def descargar():
                 break
             except Exception as exc:
                 last_exc = exc
-                # Los perfiles alternativos son exclusivamente para el 403 de YouTube.
-                if not (_is_youtube_url(url) and _is_http_403(exc)):
+                if not (is_youtube and _is_youtube_retryable(exc)):
                     raise
                 app.logger.warning(
-                    'Intento de descarga YouTube falló con 403 (perfil=%s): %s',
-                    used_profile, exc,
+                    'Intento de descarga YouTube recuperable (perfil=%s, intento=%s/%s): %s',
+                    used_profile, attempt_no + 1, total_attempts, exc,
                 )
                 continue
 
@@ -662,16 +842,29 @@ def descargar():
     except Exception as exc:
         app.logger.exception('Error durante la descarga')
         user_message = _friendly_download_error(exc)
+        error_code = _youtube_error_code(exc) if _is_youtube_url(url) else 'download-error'
+        detail = (
+            'El video puede ser público: YouTube está rechazando la IP/sesión del servidor cloud.'
+            if error_code in {'youtube-cloud-block', 'youtube-403'}
+            else 'La transferencia se detuvo después de probar las rutas compatibles disponibles.'
+        )
         progress_data[uid] = {
             'error': user_message,
+            'error_code': error_code,
             'status': user_message,
             'percent': 0,
             'stage': 'error',
-            'detail': 'La transferencia se detuvo después de probar las rutas compatibles disponibles.',
+            'detail': detail,
             'done': True,
+            **_attempt_meta(),
         }
         shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify({'error': user_message}), 422
+        return jsonify({
+            'error': user_message,
+            'error_code': error_code,
+            'detail': detail,
+            **_attempt_meta(),
+        }), 422
 
 @app.route('/convertir-audio', methods=['POST'])
 def convertir_audio():

@@ -362,6 +362,31 @@ function setDownloadButtonBusy(loading, format = selectedFormat) {
 }
 
 /* ---------- Download ---------- */
+function isYouTubeUrl(value = '') {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'youtu.be' || host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com');
+  } catch {
+    return false;
+  }
+}
+
+function setNetworkActivity(active, retrying = false) {
+  const youtube = $('[data-platform="youtube"]');
+  if (!youtube) return;
+  youtube.classList.toggle('network-active', active);
+  youtube.classList.toggle('network-retrying', active && retrying);
+}
+
+function routeLabel(meta = {}) {
+  const route = meta.route || '';
+  const attempt = Number(meta.attempt) || 0;
+  const total = Number(meta.attempt_total) || 0;
+  if (route && attempt && total > 1) return `Ruta ${attempt}/${total} · ${route}`;
+  if (route) return route;
+  return 'Ruta automática';
+}
+
 async function startDownload(format = selectedFormat) {
   const url = lastAnalyzedUrl || $('#url-input')?.value.trim();
   if (!url) {
@@ -374,7 +399,8 @@ async function startDownload(format = selectedFormat) {
   const id = uid();
   const controller = new AbortController();
   activeDownload = { id, controller };
-  showDownloadProgress(3, 'Conectando con la fuente…', '', { stage: 'connect' });
+  setNetworkActivity(isYouTubeUrl(url), false);
+  showDownloadProgress(3, 'Conectando con la fuente…', '', { stage: 'connect', route: isYouTubeUrl(url) ? 'YouTube' : 'Auto' });
   $('#checkmark-download')?.classList.remove('visible');
   $('#download-now')?.setAttribute('disabled', 'disabled');
   setDownloadButtonBusy(true, format);
@@ -386,7 +412,7 @@ async function startDownload(format = selectedFormat) {
         const res = await fetch(`/status/${id}`, { cache: 'no-store' });
         const data = await res.json();
         if (data.error) {
-          showDownloadError(data.error);
+          showDownloadError(data.error, data);
           polling = false;
           break;
         }
@@ -408,7 +434,9 @@ async function startDownload(format = selectedFormat) {
     const response = await fetch('/descargar', { method: 'POST', body: form, signal: controller.signal });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || 'No se pudo completar la descarga.');
+      const requestError = new Error(data.error || 'No se pudo completar la descarga.');
+      requestError.meta = data;
+      throw requestError;
     }
 
     const blob = await response.blob();
@@ -420,8 +448,9 @@ async function startDownload(format = selectedFormat) {
     showDownloadSuccess(filename);
   } catch (error) {
     polling = false;
-    if (error.name !== 'AbortError') showDownloadError(error.message || 'No se pudo completar la descarga.');
+    if (error.name !== 'AbortError') showDownloadError(error.message || 'No se pudo completar la descarga.', error.meta || {});
   } finally {
+    setNetworkActivity(false, false);
     activeDownload = null;
     $('#download-now')?.removeAttribute('disabled');
     setDownloadButtonBusy(false, selectedFormat);
@@ -449,8 +478,15 @@ function showDownloadProgress(percent, text, speed = '', meta = {}) {
   const area = $('#progress-area');
   const value = clamp(Number(percent) || 0, 0, 100);
   const stage = meta.stage || getDownloadStage(value, text);
+  const retrying = Boolean(meta.retrying);
   area?.classList.add('visible');
-  if (area) area.dataset.state = value >= 100 ? 'success' : value > 5 ? 'progress' : 'loading';
+  if (area) {
+    area.dataset.state = value >= 100 ? 'success' : value > 5 ? 'progress' : 'loading';
+    area.dataset.retrying = retrying ? 'true' : 'false';
+    area.dataset.stage = stage;
+  }
+
+  setNetworkActivity(isYouTubeUrl(lastAnalyzedUrl || $('#url-input')?.value || ''), retrying);
 
   const fill = $('#progress-fill');
   if (fill) {
@@ -463,15 +499,37 @@ function showDownloadProgress(percent, text, speed = '', meta = {}) {
 
   const eyebrow = $('#transfer-eyebrow');
   if (eyebrow) {
-    eyebrow.textContent = stage === 'connect'
-      ? 'Preparando transferencia'
-      : stage === 'download'
-        ? `Descargando ${selectedFormat.toUpperCase()}`
-        : `Procesando ${selectedFormat.toUpperCase()}`;
+    if (retrying && meta.attempt && meta.attempt_total) {
+      eyebrow.textContent = `Ruta alternativa ${meta.attempt}/${meta.attempt_total}`;
+    } else {
+      eyebrow.textContent = stage === 'connect'
+        ? 'Preparando transferencia'
+        : stage === 'download'
+          ? `Descargando ${selectedFormat.toUpperCase()}`
+          : `Procesando ${selectedFormat.toUpperCase()}`;
+    }
   }
   if ($('#progress-label')) $('#progress-label').textContent = text || 'Procesando…';
   if ($('#progress-pct')) $('#progress-pct').textContent = `${Math.round(value)}%`;
   if ($('#progress-speed')) $('#progress-speed').textContent = speed || (meta.eta ? `ETA ${meta.eta}` : '—');
+
+  const route = $('#transfer-route');
+  if (route) {
+    route.textContent = routeLabel(meta);
+    route.classList.toggle('is-retrying', retrying);
+  }
+
+  const switcher = $('#route-switch');
+  if (switcher) switcher.setAttribute('aria-hidden', retrying ? 'false' : 'true');
+
+  // La onda responde a la velocidad real cuando yt-dlp la reporta.
+  const speedValue = Number.parseFloat(String(speed).replace(',', '.'));
+  if (area) {
+    const duration = Number.isFinite(speedValue) && speedValue > 0
+      ? clamp(1.25 - Math.log10(speedValue + 1) * 0.46, 0.48, 1.18)
+      : (retrying ? 0.72 : 1.12);
+    area.style.setProperty('--wave-duration', `${duration}s`);
+  }
 
   const details = [];
   if (meta.downloaded && meta.total) details.push(`${meta.downloaded} / ${meta.total}`);
@@ -479,21 +537,32 @@ function showDownloadProgress(percent, text, speed = '', meta = {}) {
   if (meta.eta) details.push(`faltan aprox. ${meta.eta}`);
   if (meta.detail) details.push(meta.detail);
   if (!details.length) {
-    details.push(stage === 'connect'
-      ? 'Resolviendo la fuente y el formato disponible.'
-      : stage === 'process'
-        ? 'FFmpeg está preparando el archivo final.'
-        : 'Mantén esta pestaña abierta mientras continúa la transferencia.');
+    details.push(retrying
+      ? 'YouTube rechazó una ruta; LushiTube está cambiando de cliente automáticamente.'
+      : stage === 'connect'
+        ? 'Resolviendo la fuente y el formato disponible.'
+        : stage === 'process'
+          ? 'FFmpeg está preparando el archivo final.'
+          : 'Mantén esta pestaña abierta mientras continúa la transferencia.');
   }
   const detail = $('#progress-detail');
   if (detail) detail.textContent = details.join(' · ');
+
+  const diag = $('#error-diagnostic');
+  if (diag) { diag.hidden = true; diag.textContent = ''; }
   updateDownloadStages(stage);
 }
 
-function showDownloadError(message) {
+function showDownloadError(message, meta = {}) {
   const area = $('#progress-area');
   area?.classList.add('visible');
-  if (area) area.dataset.state = 'error';
+  if (area) {
+    area.dataset.state = 'error';
+    area.dataset.retrying = 'false';
+    area.dataset.errorCode = meta.error_code || 'download-error';
+  }
+  setNetworkActivity(false, false);
+
   const fill = $('#progress-fill');
   if (fill) {
     fill.style.width = '100%';
@@ -505,8 +574,32 @@ function showDownloadError(message) {
   if ($('#progress-label')) $('#progress-label').textContent = message;
   if ($('#progress-pct')) $('#progress-pct').textContent = 'Error';
   if ($('#progress-speed')) $('#progress-speed').textContent = '—';
-  if ($('#progress-detail')) $('#progress-detail').textContent = 'Puedes reintentar sin volver a analizar el enlace.';
-  updateDownloadStages(getDownloadStage(0, ''));
+  if ($('#progress-detail')) $('#progress-detail').textContent = meta.detail || 'Puedes reintentar sin volver a analizar el enlace.';
+
+  const route = $('#transfer-route');
+  if (route) {
+    route.textContent = routeLabel(meta);
+    route.classList.remove('is-retrying');
+  }
+  const switcher = $('#route-switch');
+  if (switcher) switcher.setAttribute('aria-hidden', 'true');
+
+  const diagnostic = $('#error-diagnostic');
+  if (diagnostic) {
+    const cloudBlock = ['youtube-cloud-block', 'youtube-403'].includes(meta.error_code);
+    diagnostic.hidden = false;
+    diagnostic.innerHTML = cloudBlock
+      ? '<strong>YouTube respondió al servidor, pero bloqueó la reproducción.</strong><span>El enlace sí fue reconocido; el problema está en la sesión/IP cloud, no en el título ni en la miniatura.</span>'
+      : `<strong>Diagnóstico</strong><span>${escapeHtml(meta.error_code || 'download-error')}</span>`;
+  }
+
+  updateDownloadStages(meta.stage && meta.stage !== 'error' ? meta.stage : 'connect');
+  // Reinicia la microanimación de error para que también se perciba en reintentos sucesivos.
+  if (area) {
+    area.classList.remove('error-pulse');
+    void area.offsetWidth;
+    area.classList.add('error-pulse');
+  }
 }
 
 function showDownloadSuccess(filename = lastDownloadedFilename) {
@@ -519,8 +612,14 @@ function showDownloadSuccess(filename = lastDownloadedFilename) {
   updateDownloadStages('process');
   $$('.progress-stages [data-stage]').forEach(item => { item.classList.remove('active'); item.classList.add('done'); });
 
+  const route = $('#transfer-route');
+  if (route) { route.textContent = 'Completado'; route.classList.remove('is-retrying'); }
+  const switcher = $('#route-switch');
+  if (switcher) switcher.setAttribute('aria-hidden', 'true');
   const success = $('#checkmark-download');
+  success?.classList.remove('celebrate');
   success?.classList.add('visible');
+  if (success) { void success.offsetWidth; success.classList.add('celebrate'); }
   const fileLabel = $('#download-success-file');
   if (fileLabel) fileLabel.textContent = filename ? `${filename} se guardó en tu dispositivo.` : 'El archivo se guardó en tu dispositivo.';
   $('#download-again').onclick = () => startDownload(selectedFormat);
@@ -545,6 +644,12 @@ function nuevaConversion(preserveInput = false) {
   updateDownloadStages('connect');
   if ($('#progress-detail')) $('#progress-detail').textContent = 'Esperando información de la fuente.';
   if ($('#progress-speed')) $('#progress-speed').textContent = '—';
+  if ($('#transfer-route')) { $('#transfer-route').textContent = 'Ruta automática'; $('#transfer-route').classList.remove('is-retrying'); }
+  $('#route-switch')?.setAttribute('aria-hidden', 'true');
+  const diagnostic = $('#error-diagnostic');
+  if (diagnostic) { diagnostic.hidden = true; diagnostic.textContent = ''; }
+  if ($('#progress-area')) { $('#progress-area').dataset.retrying = 'false'; $('#progress-area').classList.remove('error-pulse'); }
+  setNetworkActivity(false, false);
   lastDownloadedFilename = '';
   setStatus('');
   showLoader(false);

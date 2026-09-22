@@ -226,6 +226,7 @@
                   <div class="transfer-metrics">
                     <span class="progress-percent" id="progress-pct">0%</span>
                     <small id="progress-speed">—</small>
+                    <span class="transfer-route" id="transfer-route" aria-live="polite">Ruta automática</span>
                   </div>
                 </div>
                 <div class="transfer-visual">
@@ -234,11 +235,15 @@
                   </div>
                   <div class="transfer-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
                 </div>
+                <div class="route-switch" id="route-switch" aria-hidden="true">
+                  <span></span><b>Buscando otra ruta compatible</b><i></i><i></i><i></i>
+                </div>
                 <div class="progress-stages" aria-label="Etapas de la descarga">
                   <span class="active" data-stage="connect"><i><svg><use href="#i-link"></use></svg></i><b>Fuente</b><small>Conectando</small></span>
                   <span data-stage="download"><i><svg><use href="#i-download"></use></svg></i><b>Transferencia</b><small>Descargando</small></span>
                   <span data-stage="process"><i><svg><use href="#i-wave"></use></svg></i><b>Procesado</b><small>Preparando archivo</small></span>
                 </div>
+                <div class="error-diagnostic" id="error-diagnostic" hidden></div>
                 <div class="error-actions" id="download-error-actions">
                   <button id="retry-download" type="button" class="secondary-action"><svg><use href="#i-refresh"></use></svg><span>Reintentar</span></button>
                   <button id="change-link-error" type="button" class="text-action"><svg><use href="#i-link"></use></svg><span>Cambiar enlace</span></button>
@@ -246,6 +251,7 @@
               </div>
 
               <div class="success-panel" id="checkmark-download" aria-live="polite">
+                <span class="success-burst" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
                 <span class="success-icon" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
                 <div class="success-copy">
                   <span class="success-kicker">Completado</span>

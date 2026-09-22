@@ -871,3 +871,171 @@ svg { shape-rendering: geometricPrecision; }
 }
 .main-tab .tab-icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; opacity: .82; }
 .main-tab.active .tab-icon { color: var(--brand); opacity: 1; }
+
+/* =========================================================
+   LushiTube v4 · functional motion layer
+   Motion here communicates network state; it is not decorative-only.
+   ========================================================= */
+.transfer-route {
+  max-width: 150px;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--brand) 20%, var(--line));
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--brand) 4%, var(--surface));
+  font-size: .5rem;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-color .25s ease, color .25s ease, background .25s ease;
+}
+.transfer-route.is-retrying {
+  color: var(--solar);
+  border-color: color-mix(in srgb, var(--solar) 35%, var(--line));
+  background: color-mix(in srgb, var(--solar) 6%, var(--surface));
+  animation: routeChipPulse 1.15s ease-in-out infinite;
+}
+@keyframes routeChipPulse {
+  50% { border-color: color-mix(in srgb, var(--solar) 62%, var(--line)); transform: translateY(-1px); }
+}
+
+.route-switch {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin-top: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: .54rem;
+  transition: max-height .28s ease, opacity .24s ease, margin-top .28s ease;
+}
+.route-switch[aria-hidden="false"] { max-height: 28px; opacity: 1; margin-top: 7px; }
+.route-switch > span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--solar);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--solar) 24%, transparent);
+  animation: routePing 1.2s ease-out infinite;
+}
+.route-switch b { color: var(--ink-soft); font-weight: 760; }
+.route-switch i { width: 4px; height: 4px; border-radius: 50%; background: var(--brand); opacity: .3; animation: routeDots .9s ease-in-out infinite alternate; }
+.route-switch i:nth-of-type(2) { animation-delay: -.3s; }
+.route-switch i:nth-of-type(3) { animation-delay: -.6s; }
+@keyframes routePing { 70% { box-shadow: 0 0 0 7px transparent; } }
+@keyframes routeDots { to { opacity: .95; transform: translateY(-2px); } }
+
+/* Transfer wave reacts to actual throughput via --wave-duration set by JS. */
+.transfer-wave i { animation-duration: var(--wave-duration, 1.12s); }
+.progress-area[data-retrying="true"] {
+  border-color: color-mix(in srgb, var(--solar) 30%, var(--line));
+  background:
+    linear-gradient(100deg, transparent 0 43%, color-mix(in srgb, var(--solar) 4%, transparent) 48%, transparent 53%),
+    linear-gradient(180deg, color-mix(in srgb, var(--solar) 3%, transparent), transparent 62%),
+    color-mix(in srgb, var(--surface-2) 78%, transparent);
+  background-size: 240% 100%, 100% 100%, 100% 100%;
+  animation: routeScan 2.2s linear infinite;
+}
+@keyframes routeScan { to { background-position: -140% 0, 0 0, 0 0; } }
+
+/* The active pipeline stage visibly carries the signal. */
+.progress-stages span.active::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 1px solid transparent;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--state-accent) 45%, transparent), transparent) border-box;
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  background-size: 220% 100%;
+  animation: stageSignal 1.8s linear infinite;
+}
+@keyframes stageSignal { to { background-position: -120% 0; } }
+
+/* Platform activity: only YouTube gets this while an actual YouTube job is running. */
+.platform-btn.network-active {
+  position: relative;
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--line));
+}
+.platform-btn.network-active::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 1px solid color-mix(in srgb, var(--brand) 20%, transparent);
+  border-radius: 12px;
+  opacity: .55;
+  animation: networkRing 1.55s ease-in-out infinite;
+  pointer-events: none;
+}
+.platform-btn.network-retrying::after { border-color: color-mix(in srgb, var(--solar) 42%, transparent); animation-duration: .86s; }
+@keyframes networkRing { 50% { inset: -7px; opacity: 0; } }
+
+/* Main download CTA gets a restrained moving signal only during a real request. */
+.download-now.is-loading { overflow: hidden; position: relative; }
+.download-now.is-loading::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; width: 32%; left: -38%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent);
+  transform: skewX(-18deg);
+  animation: buttonTransfer 1.45s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes buttonTransfer { to { left: 112%; } }
+
+.error-diagnostic {
+  margin-top: 11px;
+  padding: 10px 11px;
+  display: grid;
+  gap: 2px;
+  border: 1px dashed color-mix(in srgb, var(--danger) 32%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 3%, var(--surface));
+  color: var(--muted);
+  font-size: .57rem;
+}
+.error-diagnostic[hidden] { display: none !important; }
+.error-diagnostic strong { color: var(--ink-soft); font-size: .59rem; }
+.error-diagnostic span { line-height: 1.45; }
+.progress-area.error-pulse { animation: errorSettle .38s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes errorSettle { 35% { transform: translateX(-2px); } 70% { transform: translateX(2px); } }
+
+/* Success burst: short and local, so completion feels tangible without confetti noise. */
+.success-panel { position: relative; overflow: hidden; }
+.success-burst { position: absolute; width: 1px; height: 1px; left: 35px; top: 35px; pointer-events: none; }
+.success-burst i { position: absolute; width: 3px; height: 12px; border-radius: 99px; background: var(--success); opacity: 0; transform-origin: 50% 30px; }
+.success-burst i:nth-child(2) { transform: rotate(60deg); background: var(--brand); }
+.success-burst i:nth-child(3) { transform: rotate(120deg); background: var(--solar); }
+.success-burst i:nth-child(4) { transform: rotate(180deg); }
+.success-burst i:nth-child(5) { transform: rotate(240deg); background: var(--brand); }
+.success-burst i:nth-child(6) { transform: rotate(300deg); background: var(--solar); }
+.success-panel.celebrate .success-burst i { animation: successRay .72s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes successRay { 0% { opacity: .7; } 100% { opacity: 0; translate: 0 24px; scale: .4; } }
+.success-panel.celebrate .success-icon { animation: successIconPop .5s cubic-bezier(.18,.89,.32,1.28) both; }
+@keyframes successIconPop { 45% { transform: scale(1.12) rotate(-4deg); } }
+
+[data-theme="light"] .transfer-route { background: rgba(255,255,255,.58); }
+[data-theme="light"] .progress-area[data-retrying="true"] {
+  background:
+    linear-gradient(100deg, transparent 0 43%, color-mix(in srgb, var(--solar) 5%, transparent) 48%, transparent 53%),
+    #f2f5f0;
+  background-size: 240% 100%, 100% 100%;
+}
+
+@media (max-width: 760px) {
+  .transfer-route { max-width: min(62vw, 210px); text-align: left; }
+  .route-switch { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transfer-route.is-retrying, .route-switch > span, .route-switch i,
+  .progress-area[data-retrying="true"], .progress-stages span.active::after,
+  .platform-btn.network-active::after, .download-now.is-loading::after,
+  .success-panel.celebrate .success-burst i, .success-panel.celebrate .success-icon,
+  .progress-area.error-pulse { animation: none !important; }
+}
