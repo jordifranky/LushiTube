@@ -332,6 +332,17 @@ function renderPreview(data) {
     else { img.removeAttribute('src'); if (fallback) fallback.style.display = 'grid'; }
   }
 
+  const platformName = String(data.platform || currentPlatform || '').toLowerCase();
+  const mp4Card = $('.format-card[data-format="mp4"]');
+  const soundcloudAudioOnly = platformName.includes('soundcloud') || isSoundCloudUrl(lastAnalyzedUrl);
+  if (mp4Card) {
+    mp4Card.disabled = soundcloudAudioOnly;
+    mp4Card.classList.toggle('is-disabled', soundcloudAudioOnly);
+    mp4Card.setAttribute('aria-disabled', String(soundcloudAudioOnly));
+    const note = $('small', mp4Card);
+    if (note) note.textContent = soundcloudAudioOnly ? 'No aplica · SoundCloud es audio' : 'Video · mejor calidad';
+  }
+  if (soundcloudAudioOnly && selectedFormat === 'mp4') selectedFormat = 'mp3';
   selectFormat(selectedFormat);
 }
 
@@ -342,6 +353,8 @@ function initFormatCards() {
 }
 
 function selectFormat(format) {
+  const requestedCard = $(`.format-card[data-format="${format}"]`);
+  if (requestedCard?.disabled) format = 'mp3';
   selectedFormat = ['mp3', 'wav', 'mp4'].includes(format) ? format : 'mp3';
   $$('.format-card').forEach(card => {
     const isSelected = card.dataset.format === selectedFormat;
@@ -366,6 +379,15 @@ function isYouTubeUrl(value = '') {
   try {
     const host = new URL(value).hostname.toLowerCase();
     return host === 'youtu.be' || host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com');
+  } catch {
+    return false;
+  }
+}
+
+function isSoundCloudUrl(value = '') {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'soundcloud.com' || host.endsWith('.soundcloud.com') || host === 'on.soundcloud.com';
   } catch {
     return false;
   }
@@ -587,10 +609,13 @@ function showDownloadError(message, meta = {}) {
   const diagnostic = $('#error-diagnostic');
   if (diagnostic) {
     const cloudBlock = ['youtube-cloud-block', 'youtube-403'].includes(meta.error_code);
+    const soundCloudBlock = String(meta.error_code || '').startsWith('soundcloud-');
     diagnostic.hidden = false;
     diagnostic.innerHTML = cloudBlock
       ? '<strong>YouTube respondió al servidor, pero bloqueó la reproducción.</strong><span>El enlace sí fue reconocido; el problema está en la sesión/IP cloud, no en el título ni en la miniatura.</span>'
-      : `<strong>Diagnóstico</strong><span>${escapeHtml(meta.error_code || 'download-error')}</span>`;
+      : soundCloudBlock
+        ? `<strong>SoundCloud reconoció la pista.</strong><span>${escapeHtml(meta.detail || 'Se probaron las rutas pública HTTP, HLS y automática.')}</span>`
+        : `<strong>Diagnóstico</strong><span>${escapeHtml(meta.error_code || 'download-error')}</span>`;
   }
 
   updateDownloadStages(meta.stage && meta.stage !== 'error' ? meta.stage : 'connect');

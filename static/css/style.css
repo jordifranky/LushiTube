@@ -1039,3 +1039,15 @@ svg { shape-rendering: geometricPrecision; }
   .success-panel.celebrate .success-burst i, .success-panel.celebrate .success-icon,
   .progress-area.error-pulse { animation: none !important; }
 }
+
+/* v5 · fuentes solo-audio */
+.format-card.is-disabled,
+.format-card:disabled {
+  opacity: .42;
+  cursor: not-allowed;
+  filter: saturate(.45);
+  transform: none !important;
+  box-shadow: none !important;
+}
+.format-card.is-disabled .format-state,
+.format-card:disabled .format-state { opacity: .35; }

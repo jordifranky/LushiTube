@@ -234,7 +234,8 @@ def health():
         'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
         'proxy_configured': bool(YTDLP_PROXY),
         'youtube_cookies_configured': bool(YOUTUBE_COOKIE_FILE),
-        'youtube_cloud_mode': 'multi-route-v4',
+        'youtube_cloud_mode': 'multi-route-v5',
+        'soundcloud_cloud_mode': 'progressive-hls-v5',
     })
 
 
@@ -331,7 +332,6 @@ def get_base_ydl_opts():
         'extractor_retries': 2,
         'file_access_retries': 2,
         'socket_timeout': 28,
-        'check_formats': 'selected',
         'source_address': '0.0.0.0',  # equivalente a --force-ipv4
         'sleep_interval_requests': 0.75,
     }
@@ -362,6 +362,45 @@ def _is_youtube_url(value):
         return False
 
 
+def _is_soundcloud_url(value):
+    try:
+        host = (urlparse(value).hostname or '').lower()
+        return host == 'soundcloud.com' or host.endswith('.soundcloud.com') or host == 'on.soundcloud.com'
+    except ValueError:
+        return False
+
+
+def _is_download_error(exc):
+    try:
+        return isinstance(exc, yt_dlp.utils.DownloadError)
+    except Exception:
+        return False
+
+
+def _is_soundcloud_retryable(exc):
+    text = str(exc).lower()
+    markers = (
+        'http error 401', 'http error 403', 'http error 404',
+        'forbidden', 'unable to download', 'client id', 'client_id',
+        'fragment', 'requested format is not available', 'no formats',
+        'connection reset', 'timed out', 'remote end closed connection',
+    )
+    return _is_download_error(exc) or any(marker in text for marker in markers)
+
+
+def _soundcloud_error_code(exc):
+    text = str(exc).lower()
+    if 'client id' in text or 'client_id' in text:
+        return 'soundcloud-client-id'
+    if 'http error 403' in text or 'forbidden' in text:
+        return 'soundcloud-403'
+    if 'http error 404' in text:
+        return 'soundcloud-404'
+    if 'login' in text or 'registered users' in text or 'authentication' in text:
+        return 'soundcloud-auth'
+    return 'soundcloud-download'
+
+
 def _is_http_403(exc):
     text = str(exc).lower()
     return 'http error 403' in text or '403: forbidden' in text or 'forbidden' in text
@@ -370,15 +409,21 @@ def _is_http_403(exc):
 def _is_youtube_retryable(exc):
     """Errores que pueden variar según el cliente de YouTube o la ruta de playback."""
     text = str(exc).lower()
+    # Privado/miembros no mejora cambiando de cliente. Todo DownloadError público sí
+    # merece pasar por el resto de rutas, porque los mensajes internos de yt-dlp
+    # cambian con frecuencia y antes algunos quedaban fuera de la lista.
+    if 'private video' in text or 'members-only' in text or 'members only' in text:
+        return False
     markers = (
         'http error 403', '403: forbidden', 'forbidden',
         'sign in to confirm you', "confirm you\'re not a bot", 'not a bot',
         'login required', 'authentication required', 'cookies',
         'video unavailable', 'not available on this app', 'no video formats found',
         'requested format is not available', 'only images are available',
-        'player response', 'challenge solving failed',
+        'player response', 'challenge solving failed', 'unable to download',
+        'fragment', 'remote end closed connection', 'timed out',
     )
-    return any(marker in text for marker in markers)
+    return _is_download_error(exc) or any(marker in text for marker in markers)
 
 
 def _youtube_error_code(exc):
@@ -519,6 +564,60 @@ def _youtube_retry_profiles(formato):
     return profiles
 
 
+def _soundcloud_retry_profiles(formato):
+    """
+    SoundCloud expone varias familias de streams. En cloud evitamos priorizar el
+    endpoint de descarga original (que puede requerir cuenta) y probamos primero
+    audio progresivo y después HLS.
+    """
+    if formato not in {'mp3', 'wav'}:
+        return []
+    common_headers = {
+        'Referer': 'https://soundcloud.com/',
+        'Origin': 'https://soundcloud.com',
+    }
+    return [
+        {
+            'name': 'soundcloud-progressive',
+            'public_name': 'SoundCloud · HTTP',
+            'label': 'Conectando con el stream de SoundCloud…',
+            'detail': 'Probando audio progresivo sin usar la descarga original de cuenta.',
+            'format': 'bestaudio[protocol^=http][format_id!*=download]/bestaudio[protocol^=http]/bestaudio/best',
+            'opts': {
+                'impersonate': 'chrome',
+                'cachedir': False,
+                'http_headers': common_headers,
+            },
+        },
+        {
+            'name': 'soundcloud-hls',
+            'public_name': 'SoundCloud · HLS',
+            'label': 'Cambiando al stream HLS…',
+            'detail': 'La ruta progresiva no respondió; probando el flujo AAC/HLS.',
+            'format': 'bestaudio[protocol*=m3u8]/bestaudio/best',
+            'opts': {
+                'impersonate': 'chrome',
+                'cachedir': False,
+                'http_headers': common_headers,
+                'concurrent_fragment_downloads': 2,
+            },
+        },
+    ]
+
+
+def _friendly_soundcloud_error(exc):
+    code = _soundcloud_error_code(exc)
+    if code == 'soundcloud-client-id':
+        return 'SoundCloud no entregó una sesión pública válida al servidor. LushiTube renovó el cliente y probó rutas alternativas.'
+    if code == 'soundcloud-403':
+        return 'SoundCloud rechazó la transferencia desde este servidor cloud (403). El enlace sí fue reconocido.'
+    if code == 'soundcloud-404':
+        return 'SoundCloud dejó de publicar temporalmente la ruta de audio solicitada o el stream cambió.'
+    if code == 'soundcloud-auth':
+        return 'Ese recurso de SoundCloud requiere una sesión o una descarga habilitada por el autor.'
+    return 'SoundCloud reconoció la pista, pero no pudo completar la transferencia desde este servidor.'
+
+
 def _friendly_download_error(exc):
     message = str(exc)
     lowered = message.lower()
@@ -552,6 +651,9 @@ def obtener_info():
         # Para metadata no comprobamos formatos descargables. En IPs cloud esa
         # validación puede provocar un 403 aun cuando título/miniatura sí son legibles.
         attempts = [('default', None)]
+        if _is_soundcloud_url(url):
+            # Fuerza a yt-dlp a renovar client_id si SoundCloud cambió sus assets.
+            attempts = [('soundcloud-fresh', None), ('default', None)]
         if _is_youtube_url(url):
             if _po_provider_config():
                 attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
@@ -568,6 +670,10 @@ def obtener_info():
         for profile_name, extractor_args in attempts:
             try:
                 ydl_opts = get_info_ydl_opts()
+                if _is_soundcloud_url(url) and profile_name == 'soundcloud-fresh':
+                    ydl_opts['cachedir'] = False
+                    ydl_opts['impersonate'] = 'chrome'
+                    ydl_opts['http_headers'] = {'Referer': 'https://soundcloud.com/', 'Origin': 'https://soundcloud.com'}
                 if extractor_args:
                     ydl_opts['extractor_args'] = extractor_args
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -614,6 +720,11 @@ def descargar():
     if formato not in {'mp3', 'wav', 'mp4'}:
         progress_data[uid] = {'error': 'Formato no soportado', 'done': True}
         return jsonify({'error': 'Formato no soportado'}), 400
+
+    if _is_soundcloud_url(url) and formato == 'mp4':
+        message = 'SoundCloud es una fuente de audio. Elige MP3 o WAV para esta pista.'
+        progress_data[uid] = {'error': message, 'error_code': 'soundcloud-audio-only', 'done': True}
+        return jsonify({'error': message, 'error_code': 'soundcloud-audio-only'}), 400
 
     progress_data[uid] = {
         'status': 'Resolviendo la fuente…',
@@ -741,10 +852,17 @@ def descargar():
     try:
         attempts = [None]
         is_youtube = _is_youtube_url(url)
+        is_soundcloud = _is_soundcloud_url(url)
+        platform_name = 'YouTube' if is_youtube else ('SoundCloud' if is_soundcloud else 'Fuente')
         if is_youtube:
             # En cloud empezamos por mweb+PO Token cuando está disponible y después
             # recorremos rutas alternativas. El perfil directo queda como último intento.
             profiles = _youtube_retry_profiles(formato)
+            attempts = profiles + [None] if profiles else [None]
+        elif is_soundcloud:
+            # SoundCloud necesita su propia estrategia; el endpoint original puede
+            # requerir login aunque el stream público sí sea reproducible.
+            profiles = _soundcloud_retry_profiles(formato)
             attempts = profiles + [None] if profiles else [None]
 
         last_exc = None
@@ -778,13 +896,13 @@ def descargar():
                     'route': public_name,
                     'done': False,
                 }
-            elif is_youtube:
+            elif is_youtube or is_soundcloud:
                 used_profile = 'direct'
                 progress_data[uid] = {
                     'status': 'Probando configuración automática de yt-dlp…',
                     'percent': min(18, 7 + attempt_no * 2),
                     'stage': 'connect',
-                    'detail': 'Último intento con los clientes por defecto de la versión actual.',
+                    'detail': f'Último intento automático para {platform_name}.',
                     'speed': '',
                     'retrying': attempt_no > 0,
                     'attempt': attempt_no + 1,
@@ -801,11 +919,15 @@ def descargar():
                 break
             except Exception as exc:
                 last_exc = exc
-                if not (is_youtube and _is_youtube_retryable(exc)):
+                retryable = (
+                    (is_youtube and _is_youtube_retryable(exc))
+                    or (is_soundcloud and _is_soundcloud_retryable(exc))
+                )
+                if not retryable:
                     raise
                 app.logger.warning(
-                    'Intento de descarga YouTube recuperable (perfil=%s, intento=%s/%s): %s',
-                    used_profile, attempt_no + 1, total_attempts, exc,
+                    'Intento de descarga %s recuperable (perfil=%s, intento=%s/%s): %s',
+                    platform_name, used_profile, attempt_no + 1, total_attempts, exc,
                 )
                 continue
 
@@ -841,13 +963,22 @@ def descargar():
 
     except Exception as exc:
         app.logger.exception('Error durante la descarga')
-        user_message = _friendly_download_error(exc)
-        error_code = _youtube_error_code(exc) if _is_youtube_url(url) else 'download-error'
-        detail = (
-            'El video puede ser público: YouTube está rechazando la IP/sesión del servidor cloud.'
-            if error_code in {'youtube-cloud-block', 'youtube-403'}
-            else 'La transferencia se detuvo después de probar las rutas compatibles disponibles.'
-        )
+        if _is_youtube_url(url):
+            user_message = _friendly_download_error(exc)
+            error_code = _youtube_error_code(exc)
+            detail = (
+                'El video puede ser público: YouTube está rechazando la IP/sesión del servidor cloud.'
+                if error_code in {'youtube-cloud-block', 'youtube-403'}
+                else 'La transferencia de YouTube se detuvo después de probar todas las rutas disponibles.'
+            )
+        elif _is_soundcloud_url(url):
+            user_message = _friendly_soundcloud_error(exc)
+            error_code = _soundcloud_error_code(exc)
+            detail = 'La pista fue reconocida; LushiTube probó stream progresivo, HLS y la ruta automática.'
+        else:
+            user_message = 'No se pudo completar la descarga. Verifica el enlace y vuelve a intentarlo.'
+            error_code = 'download-error'
+            detail = 'La transferencia se detuvo antes de completar el archivo.'
         progress_data[uid] = {
             'error': user_message,
             'error_code': error_code,
