@@ -1051,3 +1051,10 @@ svg { shape-rendering: geometricPrecision; }
 }
 .format-card.is-disabled .format-state,
 .format-card:disabled .format-state { opacity: .35; }
+
+/* v6: aviso de red sin convertir la vista previa en un estado de error */
+.preview-copy .preview-sub.is-warning,
+#video-author.is-warning {
+  color: var(--signal-warm, #c9aa73);
+  max-width: 62ch;
+}

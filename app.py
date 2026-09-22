@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, send_file, jsonify
 import yt_dlp
 import os
 import traceback
+import json
 import subprocess
 import uuid
 import threading
@@ -11,7 +12,8 @@ import socket
 import base64
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlencode
+from urllib.request import Request, urlopen
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -234,8 +236,8 @@ def health():
         'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
         'proxy_configured': bool(YTDLP_PROXY),
         'youtube_cookies_configured': bool(YOUTUBE_COOKIE_FILE),
-        'youtube_cloud_mode': 'multi-route-v5',
-        'soundcloud_cloud_mode': 'progressive-hls-v5',
+        'youtube_cloud_mode': 'oembed-network-aware-v6',
+        'soundcloud_cloud_mode': 'all-streams-v6',
     })
 
 
@@ -396,6 +398,8 @@ def _soundcloud_error_code(exc):
         return 'soundcloud-403'
     if 'http error 404' in text:
         return 'soundcloud-404'
+    if 'drm protected' in text or 'drm' in text:
+        return 'soundcloud-drm'
     if 'login' in text or 'registered users' in text or 'authentication' in text:
         return 'soundcloud-auth'
     return 'soundcloud-download'
@@ -428,6 +432,8 @@ def _is_youtube_retryable(exc):
 
 def _youtube_error_code(exc):
     text = str(exc).lower()
+    if 'http error 429' in text or '429: too many requests' in text or 'too many requests' in text:
+        return 'youtube-rate-limit'
     if 'sign in to confirm' in text or 'not a bot' in text:
         return 'youtube-cloud-block'
     if 'http error 403' in text or '403: forbidden' in text or 'forbidden' in text:
@@ -438,6 +444,8 @@ def _youtube_error_code(exc):
         return 'youtube-auth'
     if 'no video formats found' in text or 'only images are available' in text:
         return 'youtube-no-formats'
+    if not YTDLP_PROXY and ('failed to extract any player response' in text or 'player response' in text):
+        return 'youtube-cloud-block'
     return 'download-error'
 
 
@@ -501,7 +509,7 @@ def _youtube_retry_profiles(formato):
             'detail': 'Generando un PO Token temporal para YouTube.',
             'extractor_args': _youtube_pot_extractor_args(),
             'format': 'bestaudio[acodec!=none]/best[acodec!=none]/18' if audio else 'bv*+ba/b',
-            'opts': {'impersonate': 'chrome'},
+            'opts': {},
         })
 
     # web_safari expone HLS que actualmente puede funcionar sin PO Token GVS.
@@ -512,22 +520,25 @@ def _youtube_retry_profiles(formato):
         'detail': 'La ruta principal fue rechazada; probando un flujo HLS compatible.',
         'extractor_args': {'youtube': {'player_client': ['web_safari']}},
         'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/18' if audio else 'best[protocol*=m3u8]/18',
-        'opts': {'impersonate': 'safari'},
+        'opts': {},
     })
 
-    # web_embedded no exige PO Token, aunque solo funciona en videos embebibles.
-    profiles.append({
+    # Si hay proxy configurado, añadimos clientes extra. Sin proxy, Render suele
+    # responder 429/403 y repetir seis clientes solo empeora el rate limit.
+    if YTDLP_PROXY:
+        # web_embedded no exige PO Token, aunque solo funciona en videos embebibles.
+        profiles.append({
         'name': 'web-embedded',
         'public_name': 'Embedded',
         'label': 'Probando reproductor embebido…',
         'detail': 'Intentando una sesión sin PO Token para contenido embebible.',
         'extractor_args': {'youtube': {'player_client': ['web_embedded']}},
         'format': 'bestaudio/best' if audio else 'bv*+ba/b',
-        'opts': {'impersonate': 'chrome'},
-    })
+        'opts': {},
+        })
 
-    # visionos forma parte de los clientes por defecto actuales de yt-dlp.
-    profiles.append({
+        # visionos forma parte de los clientes por defecto actuales de yt-dlp.
+        profiles.append({
         'name': 'visionos',
         'public_name': 'VisionOS',
         'label': 'Cambiando de cliente de reproducción…',
@@ -535,10 +546,10 @@ def _youtube_retry_profiles(formato):
         'extractor_args': {'youtube': {'player_client': ['visionos']}},
         'format': 'bestaudio/best' if audio else 'bv*+ba/b',
         'opts': {},
-    })
+        })
 
-    # Última ruta sin PO Token para algunos videos públicos.
-    profiles.append({
+        # Última ruta sin PO Token para algunos videos públicos.
+        profiles.append({
         'name': 'android-vr',
         'public_name': 'Android VR',
         'label': 'Aplicando modo de compatibilidad…',
@@ -546,7 +557,7 @@ def _youtube_retry_profiles(formato):
         'extractor_args': {'youtube': {'player_client': ['android_vr']}},
         'format': 'bestaudio/best/18' if audio else '18/best',
         'opts': {},
-    })
+        })
 
     # Autenticación opcional. Solo se usa si el propietario del despliegue añadió
     # YOUTUBE_COOKIES_B64 de forma explícita en Render.
@@ -565,40 +576,32 @@ def _youtube_retry_profiles(formato):
 
 
 def _soundcloud_retry_profiles(formato):
-    """
-    SoundCloud expone varias familias de streams. En cloud evitamos priorizar el
-    endpoint de descarga original (que puede requerir cuenta) y probamos primero
-    audio progresivo y después HLS.
-    """
+    """Rutas públicas de SoundCloud, incluyendo HLS cifrado con AES cuando exista."""
     if formato not in {'mp3', 'wav'}:
         return []
-    common_headers = {
-        'Referer': 'https://soundcloud.com/',
-        'Origin': 'https://soundcloud.com',
-    }
+    all_formats = {'soundcloud': {'formats': ['*']}}
     return [
         {
-            'name': 'soundcloud-progressive',
-            'public_name': 'SoundCloud · HTTP',
-            'label': 'Conectando con el stream de SoundCloud…',
-            'detail': 'Probando audio progresivo sin usar la descarga original de cuenta.',
-            'format': 'bestaudio[protocol^=http][format_id!*=download]/bestaudio[protocol^=http]/bestaudio/best',
+            'name': 'soundcloud-all',
+            'public_name': 'SoundCloud · todos los streams',
+            'label': 'Buscando el stream público disponible…',
+            'detail': 'Solicitando todos los formatos publicados por SoundCloud, incluido HLS-AES.',
+            'format': 'bestaudio/best',
+            'extractor_args': all_formats,
             'opts': {
-                'impersonate': 'chrome',
                 'cachedir': False,
-                'http_headers': common_headers,
+                'concurrent_fragment_downloads': 2,
             },
         },
         {
-            'name': 'soundcloud-hls',
-            'public_name': 'SoundCloud · HLS',
-            'label': 'Cambiando al stream HLS…',
-            'detail': 'La ruta progresiva no respondió; probando el flujo AAC/HLS.',
-            'format': 'bestaudio[protocol*=m3u8]/bestaudio/best',
+            'name': 'soundcloud-audio',
+            'public_name': 'SoundCloud · audio alternativo',
+            'label': 'Probando una ruta de audio alternativa…',
+            'detail': 'Reintentando con todos los codecs públicos sin forzar navegador.',
+            'format': 'bestaudio[acodec!=none]/best',
+            'extractor_args': {'soundcloud': {'formats': ['*_aac', '*_opus', '*_mp3', 'hls-aes_*']}},
             'opts': {
-                'impersonate': 'chrome',
                 'cachedir': False,
-                'http_headers': common_headers,
                 'concurrent_fragment_downloads': 2,
             },
         },
@@ -613,6 +616,8 @@ def _friendly_soundcloud_error(exc):
         return 'SoundCloud rechazó la transferencia desde este servidor cloud (403). El enlace sí fue reconocido.'
     if code == 'soundcloud-404':
         return 'SoundCloud dejó de publicar temporalmente la ruta de audio solicitada o el stream cambió.'
+    if code == 'soundcloud-drm':
+        return 'SoundCloud solo publicó streams protegidos para esta pista; LushiTube no puede convertir un stream DRM.'
     if code == 'soundcloud-auth':
         return 'Ese recurso de SoundCloud requiere una sesión o una descarga habilitada por el autor.'
     return 'SoundCloud reconoció la pista, pero no pudo completar la transferencia desde este servidor.'
@@ -623,6 +628,11 @@ def _friendly_download_error(exc):
     lowered = message.lower()
     code = _youtube_error_code(exc)
 
+    if code == 'youtube-rate-limit':
+        return (
+            'YouTube está limitando la IP pública de este servidor (HTTP 429). '
+            'El enlace puede ser público; Render necesita otra salida de red para descargar desde YouTube.'
+        )
     if code == 'youtube-cloud-block':
         return (
             'YouTube bloqueó la sesión anónima del servidor cloud. El enlace puede ser público; '
@@ -639,6 +649,50 @@ def _friendly_download_error(exc):
         return 'YouTube no entregó formatos reproducibles a este servidor. Prueba de nuevo o usa otro contenido público.'
     return 'No se pudo completar la descarga. Verifica el enlace y vuelve a intentarlo.'
 
+def _youtube_video_id(url):
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower()
+        if host == 'youtu.be':
+            return parsed.path.strip('/').split('/')[0] or None
+        if host.endswith('youtube.com') or host.endswith('youtube-nocookie.com'):
+            if parsed.path == '/watch':
+                return (parse_qs(parsed.query).get('v') or [None])[0]
+            parts = [x for x in parsed.path.split('/') if x]
+            if len(parts) >= 2 and parts[0] in {'shorts', 'embed', 'live'}:
+                return parts[1]
+    except Exception:
+        pass
+    return None
+
+
+def _youtube_oembed_metadata(url):
+    """Vista previa ligera cuando YouTube bloquea las IP de datacenter de yt-dlp."""
+    video_id = _youtube_video_id(url)
+    if not video_id:
+        return None
+    endpoint = 'https://www.youtube.com/oembed?' + urlencode({'url': f'https://www.youtube.com/watch?v={video_id}', 'format': 'json'})
+    try:
+        req = Request(endpoint, headers={'User-Agent': 'Mozilla/5.0 LushiTube/1.0'})
+        with urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        return {
+            'title': data.get('title') or 'Video de YouTube',
+            'thumbnail': f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg',
+            'duration': '--:--',
+            'platform': 'youtube',
+            'runtime_ready': bool(JS_RUNTIMES),
+            'runtime': next(iter(JS_RUNTIMES), None),
+            'pot_ready': _po_provider_config(),
+            'info_profile': 'oembed-fallback',
+            'network_limited': True,
+            'warning': 'Vista previa disponible. YouTube está limitando la IP de Render; la descarga necesita una salida de red distinta.',
+        }
+    except Exception as exc:
+        app.logger.warning('Fallback oEmbed de YouTube falló: %s', exc)
+        return None
+
+
 # ===== INFO DEL VIDEO =====
 @app.route('/info', methods=['POST'])
 def obtener_info():
@@ -652,17 +706,18 @@ def obtener_info():
         # validación puede provocar un 403 aun cuando título/miniatura sí son legibles.
         attempts = [('default', None)]
         if _is_soundcloud_url(url):
-            # Fuerza a yt-dlp a renovar client_id si SoundCloud cambió sus assets.
-            attempts = [('soundcloud-fresh', None), ('default', None)]
+            # Para metadata pedimos todas las familias de stream; algunas pistas públicas
+            # solo exponen HLS-AES y no aparecen con los formatos predeterminados.
+            attempts = [
+                ('soundcloud-all', {'soundcloud': {'formats': ['*']}}),
+                ('default', None),
+            ]
         if _is_youtube_url(url):
+            # Evitamos seis peticiones consecutivas desde una IP ya limitada. Dos intentos
+            # bastan para detectar el bloqueo; luego usamos oEmbed solo para la vista previa.
+            attempts = [('default', None)]
             if _po_provider_config():
                 attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
-            attempts.extend([
-                ('web-embedded', {'youtube': {'player_client': ['web_embedded']}}),
-                ('web-safari', {'youtube': {'player_client': ['web_safari']}}),
-                ('visionos', {'youtube': {'player_client': ['visionos']}}),
-                ('android-vr', {'youtube': {'player_client': ['android_vr']}}),
-            ])
 
         info = None
         last_exc = None
@@ -670,10 +725,8 @@ def obtener_info():
         for profile_name, extractor_args in attempts:
             try:
                 ydl_opts = get_info_ydl_opts()
-                if _is_soundcloud_url(url) and profile_name == 'soundcloud-fresh':
+                if _is_soundcloud_url(url):
                     ydl_opts['cachedir'] = False
-                    ydl_opts['impersonate'] = 'chrome'
-                    ydl_opts['http_headers'] = {'Referer': 'https://soundcloud.com/', 'Origin': 'https://soundcloud.com'}
                 if extractor_args:
                     ydl_opts['extractor_args'] = extractor_args
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -687,6 +740,10 @@ def obtener_info():
                 app.logger.warning('Metadata falló (perfil=%s): %s', profile_name, exc)
                 continue
         if last_exc is not None or info is None:
+            if _is_youtube_url(url):
+                fallback = _youtube_oembed_metadata(url)
+                if fallback:
+                    return jsonify(fallback)
             raise last_exc or RuntimeError('No se pudo obtener metadata')
 
         duracion_segundos = info.get('duration') or 0
@@ -706,6 +763,12 @@ def obtener_info():
         })
     except Exception as exc:
         app.logger.warning('No se pudo obtener metadata: %s', exc)
+        if _is_youtube_url(url) and _youtube_error_code(exc) in {'youtube-rate-limit', 'youtube-cloud-block', 'youtube-403', 'download-error'}:
+            return jsonify({
+                'error': 'YouTube está rechazando las solicitudes desde la IP de Render (429/403).',
+                'error_code': 'youtube-cloud-ip-blocked',
+                'detail': 'No es un problema del enlace: la salida de red del servidor está limitada por YouTube.',
+            }), 429
         return jsonify({'error': 'No se pudo leer ese enlace. Puede ser privado, no compatible o requerir autenticación.'}), 422
 
 @app.route('/descargar', methods=['POST'])

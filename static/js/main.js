@@ -323,7 +323,12 @@ function renderPreview(data) {
   if (title) title.textContent = data.title || 'Contenido multimedia';
   if (duration) duration.textContent = data.duration || '--:--';
   if (badge) badge.textContent = (data.platform || currentPlatform || 'contenido').replace('_', ' ');
-  if (author) author.textContent = data.runtime_ready === false ? 'Disponible · el servidor puede requerir runtime JS para algunos enlaces.' : 'Listo para elegir formato.';
+  if (author) {
+    author.textContent = data.warning || (data.runtime_ready === false
+      ? 'Disponible · el servidor puede requerir runtime JS para algunos enlaces.'
+      : 'Listo para elegir formato.');
+    author.classList.toggle('is-warning', Boolean(data.warning));
+  }
 
   if (img) {
     img.onload = () => { if (fallback) fallback.style.display = 'none'; };
@@ -608,7 +613,7 @@ function showDownloadError(message, meta = {}) {
 
   const diagnostic = $('#error-diagnostic');
   if (diagnostic) {
-    const cloudBlock = ['youtube-cloud-block', 'youtube-403'].includes(meta.error_code);
+    const cloudBlock = ['youtube-cloud-block', 'youtube-cloud-ip-blocked', 'youtube-rate-limit', 'youtube-403'].includes(meta.error_code);
     const soundCloudBlock = String(meta.error_code || '').startsWith('soundcloud-');
     diagnostic.hidden = false;
     diagnostic.innerHTML = cloudBlock
