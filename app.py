@@ -34,27 +34,63 @@ convert_progress = {}
 # No se requiere para enlaces públicos y, por seguridad, se mantiene desactivado por defecto.
 YTDLP_PROXY = (os.environ.get('YTDLP_PROXY') or '').strip()
 YOUTUBE_COOKIES_B64 = (os.environ.get('YOUTUBE_COOKIES_B64') or '').strip()
+YOUTUBE_COOKIES_PATH = (os.environ.get('YOUTUBE_COOKIES_PATH') or '').strip()
 YOUTUBE_COOKIE_FILE = None
+YOUTUBE_AUTH_MODE = 'none'
+
+
+def _valid_cookie_text(text):
+    lines = text.splitlines()
+    first = lines[0].strip() if lines else ''
+    return first in {'# Netscape HTTP Cookie File', '# HTTP Cookie File'}
 
 
 def _prepare_youtube_cookie_file():
-    global YOUTUBE_COOKIE_FILE
+    """Carga cookies solo en runtime. Prioriza Secret File de Render y luego Base64."""
+    global YOUTUBE_COOKIE_FILE, YOUTUBE_AUTH_MODE
+
+    # En Docker, Render monta Secret Files en /etc/secrets/<filename>.
+    candidates = []
+    if YOUTUBE_COOKIES_PATH:
+        candidates.append(YOUTUBE_COOKIES_PATH)
+    candidates.append('/etc/secrets/youtube-cookies.txt')
+
+    for candidate in candidates:
+        try:
+            if not candidate or not os.path.isfile(candidate):
+                continue
+            text = Path(candidate).read_text(encoding='utf-8-sig').replace('\r\n', '\n')
+            if not _valid_cookie_text(text):
+                raise ValueError('Formato cookies.txt inválido')
+            path = '/tmp/lushitube-youtube-cookies.txt'
+            Path(path).write_text(text, encoding='utf-8', newline='\n')
+            os.chmod(path, 0o600)
+            YOUTUBE_COOKIE_FILE = path
+            YOUTUBE_AUTH_MODE = 'secret-file'
+            app.logger.info('Sesión de YouTube cargada desde Secret File.')
+            return path
+        except Exception as exc:
+            app.logger.warning('No se pudo cargar Secret File de YouTube (%s): %s', candidate, exc)
+
     if not YOUTUBE_COOKIES_B64:
         return None
+
     path = '/tmp/lushitube-youtube-cookies.txt'
     try:
         payload = base64.b64decode(YOUTUBE_COOKIES_B64, validate=True)
         text = payload.decode('utf-8-sig').replace('\r\n', '\n')
-        first = text.splitlines()[0].strip() if text.splitlines() else ''
-        if first not in {'# Netscape HTTP Cookie File', '# HTTP Cookie File'}:
+        if not _valid_cookie_text(text):
             raise ValueError('Formato cookies.txt inválido')
         Path(path).write_text(text, encoding='utf-8', newline='\n')
         os.chmod(path, 0o600)
         YOUTUBE_COOKIE_FILE = path
+        YOUTUBE_AUTH_MODE = 'base64-env'
+        app.logger.info('Sesión de YouTube cargada desde variable de entorno.')
         return path
-    except Exception:
-        app.logger.warning('YOUTUBE_COOKIES_B64 está definido, pero no pudo cargarse. Se ignorará.')
+    except Exception as exc:
+        app.logger.warning('YOUTUBE_COOKIES_B64 está definido, pero no pudo cargarse: %s', exc)
         YOUTUBE_COOKIE_FILE = None
+        YOUTUBE_AUTH_MODE = 'invalid'
         return None
 
 
@@ -236,7 +272,8 @@ def health():
         'pot_server': _pot_server_available() if '_pot_server_available' in globals() else False,
         'proxy_configured': bool(YTDLP_PROXY),
         'youtube_cookies_configured': bool(YOUTUBE_COOKIE_FILE),
-        'youtube_cloud_mode': 'oembed-network-aware-v6',
+        'youtube_cloud_mode': 'render-auth-first-v7',
+        'youtube_auth_mode': YOUTUBE_AUTH_MODE,
         'soundcloud_cloud_mode': 'all-streams-v6',
     })
 
@@ -495,82 +532,60 @@ def _find_download_result(job_dir, formato):
 
 def _youtube_retry_profiles(formato):
     """
-    Rutas de YouTube ordenadas por compatibilidad actual. No todas funcionarán
-    desde todas las IP de datacenter; por eso se prueban de manera automática.
+    Rutas de YouTube para Render. Si existe una sesión configurada, se usa PRIMERO
+    junto con mweb + PO Token. Esto evita gastar la cuota de la IP compartida antes
+    de intentar la autenticación que YouTube está solicitando.
     """
     audio = formato in {'mp3', 'wav'}
     profiles = []
+    audio_fmt = 'bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/18'
+    video_fmt = 'bv*+ba/b'
 
+    # 1) Render-only recomendado: sesión + PO Token.
+    if YOUTUBE_COOKIE_FILE and _po_provider_config():
+        profiles.append({
+            'name': 'auth-po-token-mweb',
+            'public_name': 'Sesión + PO Token · mweb',
+            'label': 'Validando la sesión de YouTube…',
+            'detail': 'Usando la sesión privada configurada en Render junto con PO Token.',
+            'extractor_args': _youtube_pot_extractor_args(),
+            'format': audio_fmt if audio else video_fmt,
+            'opts': {'cookiefile': YOUTUBE_COOKIE_FILE},
+        })
+
+    # 2) Sesión autenticada con selección automática de cliente.
+    if YOUTUBE_COOKIE_FILE:
+        profiles.append({
+            'name': 'auth-auto',
+            'public_name': 'Sesión autorizada · Auto',
+            'label': 'Probando sesión autorizada…',
+            'detail': 'YouTube pidió iniciar sesión; usando las cookies privadas de Render.',
+            'extractor_args': {},
+            'format': audio_fmt if audio else video_fmt,
+            'opts': {'cookiefile': YOUTUBE_COOKIE_FILE},
+        })
+
+    # 3) Rutas anónimas como respaldo.
     if _po_provider_config():
         profiles.append({
             'name': 'po-token-mweb',
             'public_name': 'PO Token · mweb',
-            'label': 'Validando la sesión de reproducción…',
-            'detail': 'Generando un PO Token temporal para YouTube.',
+            'label': 'Probando sesión pública con PO Token…',
+            'detail': 'Intentando reproducción pública sin credenciales de cuenta.',
             'extractor_args': _youtube_pot_extractor_args(),
-            'format': 'bestaudio[acodec!=none]/best[acodec!=none]/18' if audio else 'bv*+ba/b',
+            'format': audio_fmt if audio else video_fmt,
             'opts': {},
         })
 
-    # web_safari expone HLS que actualmente puede funcionar sin PO Token GVS.
     profiles.append({
         'name': 'web-safari-hls',
         'public_name': 'HLS · Safari',
         'label': 'Probando reproducción HLS…',
-        'detail': 'La ruta principal fue rechazada; probando un flujo HLS compatible.',
+        'detail': 'Probando un flujo HLS alternativo.',
         'extractor_args': {'youtube': {'player_client': ['web_safari']}},
         'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/18' if audio else 'best[protocol*=m3u8]/18',
-        'opts': {},
+        'opts': {'cookiefile': YOUTUBE_COOKIE_FILE} if YOUTUBE_COOKIE_FILE else {},
     })
-
-    # Si hay proxy configurado, añadimos clientes extra. Sin proxy, Render suele
-    # responder 429/403 y repetir seis clientes solo empeora el rate limit.
-    if YTDLP_PROXY:
-        # web_embedded no exige PO Token, aunque solo funciona en videos embebibles.
-        profiles.append({
-        'name': 'web-embedded',
-        'public_name': 'Embedded',
-        'label': 'Probando reproductor embebido…',
-        'detail': 'Intentando una sesión sin PO Token para contenido embebible.',
-        'extractor_args': {'youtube': {'player_client': ['web_embedded']}},
-        'format': 'bestaudio/best' if audio else 'bv*+ba/b',
-        'opts': {},
-        })
-
-        # visionos forma parte de los clientes por defecto actuales de yt-dlp.
-        profiles.append({
-        'name': 'visionos',
-        'public_name': 'VisionOS',
-        'label': 'Cambiando de cliente de reproducción…',
-        'detail': 'Probando un cliente alternativo mantenido por yt-dlp.',
-        'extractor_args': {'youtube': {'player_client': ['visionos']}},
-        'format': 'bestaudio/best' if audio else 'bv*+ba/b',
-        'opts': {},
-        })
-
-        # Última ruta sin PO Token para algunos videos públicos.
-        profiles.append({
-        'name': 'android-vr',
-        'public_name': 'Android VR',
-        'label': 'Aplicando modo de compatibilidad…',
-        'detail': 'Último cliente público antes de abandonar la transferencia.',
-        'extractor_args': {'youtube': {'player_client': ['android_vr']}},
-        'format': 'bestaudio/best/18' if audio else '18/best',
-        'opts': {},
-        })
-
-    # Autenticación opcional. Solo se usa si el propietario del despliegue añadió
-    # YOUTUBE_COOKIES_B64 de forma explícita en Render.
-    if YOUTUBE_COOKIE_FILE:
-        profiles.append({
-            'name': 'cookies',
-            'public_name': 'Sesión autorizada',
-            'label': 'Probando sesión autorizada…',
-            'detail': 'Usando la sesión privada configurada por el propietario del servidor.',
-            'extractor_args': {},
-            'format': 'bestaudio/best' if audio else 'bv*+ba/b',
-            'opts': {'cookiefile': YOUTUBE_COOKIE_FILE},
-        })
 
     return profiles
 
@@ -634,9 +649,14 @@ def _friendly_download_error(exc):
             'El enlace puede ser público; Render necesita otra salida de red para descargar desde YouTube.'
         )
     if code == 'youtube-cloud-block':
+        if YOUTUBE_COOKIE_FILE:
+            return (
+                'YouTube rechazó también la sesión configurada en Render. Las cookies pueden haber expirado '
+                'o la IP compartida del servidor puede seguir limitada.'
+            )
         return (
-            'YouTube bloqueó la sesión anónima del servidor cloud. El enlace puede ser público; '
-            'el bloqueo suele depender de la IP de Render. LushiTube probó varias rutas de reproducción.'
+            'YouTube exige una sesión autenticada para este servidor. Configura youtube-cookies.txt '
+            'como Secret File en Render para continuar sin usar túneles externos.'
         )
     if code == 'youtube-403':
         return (
@@ -686,7 +706,7 @@ def _youtube_oembed_metadata(url):
             'pot_ready': _po_provider_config(),
             'info_profile': 'oembed-fallback',
             'network_limited': True,
-            'warning': 'Vista previa disponible. YouTube está limitando la IP de Render; la descarga necesita una salida de red distinta.',
+            'warning': 'Vista previa disponible. Si la descarga pide inicio de sesión, configura una sesión privada de YouTube en Render.',
         }
     except Exception as exc:
         app.logger.warning('Fallback oEmbed de YouTube falló: %s', exc)
@@ -713,11 +733,17 @@ def obtener_info():
                 ('default', None),
             ]
         if _is_youtube_url(url):
-            # Evitamos seis peticiones consecutivas desde una IP ya limitada. Dos intentos
-            # bastan para detectar el bloqueo; luego usamos oEmbed solo para la vista previa.
-            attempts = [('default', None)]
-            if _po_provider_config():
-                attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
+            # En Render, si YouTube exige login usamos la sesión ANTES que los intentos
+            # anónimos. El PO Token complementa la sesión; no la sustituye.
+            attempts = []
+            if YOUTUBE_COOKIE_FILE and _po_provider_config():
+                attempts.append(('auth-po-token-mweb', _youtube_pot_extractor_args()))
+            if YOUTUBE_COOKIE_FILE:
+                attempts.append(('auth-default', None))
+            if not attempts:
+                attempts.append(('default', None))
+                if _po_provider_config():
+                    attempts.append(('po-token-mweb', _youtube_pot_extractor_args()))
 
         info = None
         last_exc = None
@@ -727,6 +753,8 @@ def obtener_info():
                 ydl_opts = get_info_ydl_opts()
                 if _is_soundcloud_url(url):
                     ydl_opts['cachedir'] = False
+                if _is_youtube_url(url) and YOUTUBE_COOKIE_FILE:
+                    ydl_opts['cookiefile'] = YOUTUBE_COOKIE_FILE
                 if extractor_args:
                     ydl_opts['extractor_args'] = extractor_args
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1030,7 +1058,7 @@ def descargar():
             user_message = _friendly_download_error(exc)
             error_code = _youtube_error_code(exc)
             detail = (
-                'El video puede ser público: YouTube está rechazando la IP/sesión del servidor cloud.'
+                ('YouTube está rechazando la sesión configurada o la IP del servidor cloud.' if YOUTUBE_COOKIE_FILE else 'YouTube requiere una sesión privada configurada en Render.')
                 if error_code in {'youtube-cloud-block', 'youtube-403'}
                 else 'La transferencia de YouTube se detuvo después de probar todas las rutas disponibles.'
             )
